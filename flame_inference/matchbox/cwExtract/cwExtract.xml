@@ -1,0 +1,45 @@
+<!--
+cwExtract (cwTools): object mattes from a cwSegment "Object IDs" map (object k = value k * 0.02,
+background 0, up to 50 objects). One node gives up to four mattes (R, G, B + Matte output); use
+one node per group of objects. The ID map must reach this node unfiltered (no resize / blur /
+colour transform). UI labels are the DisplayName attributes; the Name attributes are the GLSL
+uniforms (rename labels freely, keep Name).
+-->
+<ShaderNodePreset SupportsAdaptiveDegradation="False" SupportsAction="False" SupportsTransition="False" SupportsTimeline="False" TimelineUseBack="False" MatteProvider="True" CommercialUsePermitted="True" DefaultIsNoOp="False" ShaderType="Matchbox" SoftwareVersion="2027.2.0" LimitInputsToTexture="True" Version="2" Description="Object mattes from a cwSegment Object IDs map. RGB + Matte: pick an object for each of R, G, B and the Matte output. One Object: that object in all channels. Range: objects From..To as one matte. Feed the ID map unfiltered." Name="cwExtract">
+   <Shader Clear="0" GridSubdivision="1" OutputBitDepth="Output" Index="1">
+      <Uniform Index="0" NoInput="Error" Tooltip="cwSegment with Output = Object IDs (object k = k x 0.02). Must be unfiltered: no resize, blur or colour transform in between." DisplayName="Object IDs" InputType="Front" Mipmaps="False" GL_TEXTURE_WRAP_T="GL_CLAMP_TO_EDGE" GL_TEXTURE_WRAP_S="GL_CLAMP_TO_EDGE" GL_TEXTURE_MAG_FILTER="GL_NEAREST" GL_TEXTURE_MIN_FILTER="GL_NEAREST" Type="sampler2D" Name="idTex">
+      </Uniform>
+      <Uniform Default="0" Inc="1" Tooltip="RGB + Matte: one object per channel (R, G, B, Matte output). One Object: one object in all channels. Range: objects From..To merged into one matte in all channels." Row="0" Col="0" Page="0" DisplayName="Mode" Type="int" ValueType="Popup" Name="mode">
+         <PopupEntry Title="RGB + Matte" Value="0">
+         </PopupEntry>
+         <PopupEntry Title="One Object" Value="1">
+         </PopupEntry>
+         <PopupEntry Title="Range" Value="2">
+         </PopupEntry>
+      </Uniform>
+      <Uniform Row="1" Col="0" Page="0" Default="False" Tooltip="Output 1 - matte (background matte) in every channel." DisplayName="Invert" Type="bool" Name="invertOut">
+      </Uniform>
+      <Uniform Max="50" Min="0" Default="1" Inc="1" Tooltip="RGB + Matte: object number in Red (0 = none). Numbers as in cwSegment's ID Map view." Row="0" Col="1" Page="0" Type="int" DisplayName="Red" Name="objR">
+      </Uniform>
+      <Uniform Max="50" Min="0" Default="2" Inc="1" Tooltip="RGB + Matte: object number in Green (0 = none)." Row="1" Col="1" Page="0" Type="int" DisplayName="Green" Name="objG">
+      </Uniform>
+      <Uniform Max="50" Min="0" Default="3" Inc="1" Tooltip="RGB + Matte: object number in Blue (0 = none)." Row="2" Col="1" Page="0" Type="int" DisplayName="Blue" Name="objB">
+      </Uniform>
+      <Uniform Max="50" Min="0" Default="4" Inc="1" Tooltip="RGB + Matte: object number on the Matte output (0 = none)." Row="3" Col="1" Page="0" Type="int" DisplayName="Matte" Name="objMatte">
+      </Uniform>
+      <Uniform Max="50" Min="0" Default="1" Inc="1" Tooltip="One Object: the object number, output in all channels." Row="0" Col="2" Page="0" Type="int" DisplayName="Object" Name="objOne">
+      </Uniform>
+      <Uniform Max="50" Min="0" Default="1" Inc="1" Tooltip="Range: first object number (inclusive)." Row="1" Col="2" Page="0" Type="int" DisplayName="From" Name="rangeFrom">
+      </Uniform>
+      <Uniform Max="50" Min="0" Default="50" Inc="1" Tooltip="Range: last object number (inclusive)." Row="2" Col="2" Page="0" Type="int" DisplayName="To" Name="rangeTo">
+      </Uniform>
+   </Shader>
+   <Page Name="cwExtract" Page="0">
+      <Col Name="Output" Col="0" Page="0">
+      </Col>
+      <Col Name="RGB + Matte" Col="1" Page="0">
+      </Col>
+      <Col Name="One / Range" Col="2" Page="0">
+      </Col>
+   </Page>
+</ShaderNodePreset>

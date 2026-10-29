@@ -1,0 +1,47 @@
+cwTools - third-party notices
+
+cwTools itself is licensed under the Apache License 2.0 (LICENSE). The model files
+cwTools can install are NOT covered by that licence: each keeps the licence of the
+project it comes from. Full texts are in the licenses/ folder.
+
+MODELS (separate downloads, see install/models.tsv)
+
+  cwSegment  models/cwSegment/   SAM 3 (Meta), encoder / decoder exported to ONNX
+             Licence: SAM License (Meta), licenses/SAM_LICENSE.txt
+             These files are SAM Materials (derivative works) and are distributed under
+             the SAM License. Using them means you agree to its terms, including the trade
+             control and prohibited end use clauses (section 1.b.v).
+             https://github.com/facebookresearch/sam3
+
+  cwMatte    models/cwMatte/     BiRefNet (Peng Zheng et al.), ONNX exports of
+             BiRefNet_HR-matting (epoch 135), BiRefNet_dynamic general (epoch 174),
+             BiRefNet-general swin_v1_tiny (epoch 232)
+             Licence: MIT, Copyright (c) 2024 ZhengPeng, licenses/BiRefNet_LICENSE.txt
+             https://github.com/ZhengPeng7/BiRefNet
+
+  cwRefine   models/cwRefine/    ViTMatte (Hust Vision Lab), ONNX export
+             Licence: MIT, Copyright (c) 2023 Hust Vision Lab, licenses/ViTMatte_LICENSE.txt
+             https://github.com/hustvl/ViTMatte
+
+             MEMatte (Yiheng Lin et al.), ONNX export
+             Licence: MIT (stated in the project README), licenses/MEMatte_LICENSE.txt
+             https://github.com/linyiheng123/MEMatte
+
+  The Remote inference server (server_models/) uses the same BiRefNet, ViTMatte and
+  MEMatte files under the same licences.
+
+TRAINING DATA
+
+  The licences above cover the code and the released weights. Some of these models
+  were trained by their authors on public research datasets whose own terms restrict
+  commercial use of the datasets (for example Composition-1k for ViTMatte / MEMatte,
+  and DIS5K and PPM-100 for some BiRefNet checkpoints). cwTools redistributes the
+  weights as released; it does not include or redistribute any training data. Whether
+  you are comfortable using such weights in commercial work is your decision.
+
+NOT INCLUDED
+
+  ONNX Runtime    cwTools uses the onnxruntime library that ships with Flame (or one you
+                  point it to); the Remote server installs it from PyPI. MIT licence.
+  Auto Concepts   cwSegment's optional VLM runs in your own Ollama install (e.g.
+                  Qwen3-VL, Apache-2.0); no VLM weights are shipped.

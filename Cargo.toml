@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/cwtools-core", "crates/cwsegment", "crates/cwrefine", "crates/cwmatte", "crates/cwtools-remote"]
+# cwFill (imported with its history 2026-10-12) is still its own workspace with
+# its own profile (panic=abort, fat LTO) and version; build it from crates/cwfill
+# (scripts/build.sh there). Folding it into this workspace is a separate step.
+exclude = ["crates/cwfill"]
+
+[workspace.package]
+# ONE version for the whole cwTools suite (plugins + core + remote). Bump it per
+# install cycle (scripts/install_beta.sh records it); tag the commit vX.Y.Z.
+# Minor bumps only while 0.x: Flame keys saved setups on the major version.
+version = "0.3.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+# NOT abort: every OFX entry point is wrapped in catch_unwind so a bug can
+# never take Flame down with it.
+panic = "unwind"

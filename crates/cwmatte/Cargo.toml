@@ -1,0 +1,16 @@
+[package]
+name = "cwmatte"
+version.workspace = true
+edition = "2021"
+description = "cwMatte — OFX automatic BiRefNet matte for Flame (no prompts; ROI pre-crop, matte controls)"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cwtools-core = { path = "../cwtools-core" }
+cwtools-remote = { path = "../cwtools-remote" }
+serde_json = "1"
+# Pinned with cwtools-core: rc.10 = ONNX Runtime 1.22 C API (Flame 2027.2's bundled ORT).
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "cuda", "std"] }

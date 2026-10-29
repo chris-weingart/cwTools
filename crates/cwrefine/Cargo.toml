@@ -1,0 +1,27 @@
+[package]
+name = "cwrefine"
+version.workspace = true
+edition = "2021"
+description = "cwRefine — OFX ViTMatte matte refinement for Flame (production cropped recipe, full parameter control)"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Spline trimap UI (Spline / Spline Points groups, Edit / Show Splines, overlay
+# interact). Parked, OFF = none of it is described or registered and
+# the trimap is the production one. Re-enable: default = ["spline"].
+default = []
+spline = []
+# MEMatte Synth / Synth 2 test fine-tunes (not validated for release): internal builds only.
+test-models = []
+
+[dependencies]
+cwtools-core = { path = "../cwtools-core" }
+cwtools-remote = { path = "../cwtools-remote" }
+# Pinned with cwtools-core: rc.10 = ONNX Runtime 1.22 C API (Flame 2027.2's bundled ORT).
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "cuda", "std"] }
+
+[dev-dependencies]
+serde_json = "1"

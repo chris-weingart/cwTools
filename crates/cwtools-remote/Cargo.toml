@@ -1,0 +1,17 @@
+[package]
+name = "cwtools-remote"
+version.workspace = true
+edition = "2021"
+description = "Client for the cwtools-infer server (Remote mode of cwRefine / cwMatte): CWT1 lossless tensor container over HTTP"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+ureq = { version = "2.12", default-features = false }
+serde_json = "1"
+zstd = { version = "0.13", default-features = false }
+sha2 = "0.10"
+crc32fast = "1"
+webp = { version = "0.3", default-features = false }

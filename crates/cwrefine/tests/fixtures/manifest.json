@@ -1,0 +1,1431 @@
+{
+ "versions": {
+  "pillow": "12.1.1",
+  "cv2": "4.13.0",
+  "numpy": "2.4.3"
+ },
+ "cases": [
+  {
+   "kind": "lanczos",
+   "mode": "RGB",
+   "src": {
+    "file": "lz0_src.bin",
+    "shape": [
+     61,
+     97,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dst": {
+    "file": "lz0_dst.bin",
+    "shape": [
+     40,
+     53,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dw": 53,
+   "dh": 40
+  },
+  {
+   "kind": "lanczos",
+   "mode": "RGB",
+   "src": {
+    "file": "lz1_src.bin",
+    "shape": [
+     61,
+     97,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dst": {
+    "file": "lz1_dst.bin",
+    "shape": [
+     90,
+     150,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dw": 150,
+   "dh": 90
+  },
+  {
+   "kind": "lanczos",
+   "mode": "RGB",
+   "src": {
+    "file": "lz2_src.bin",
+    "shape": [
+     61,
+     97,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dst": {
+    "file": "lz2_dst.bin",
+    "shape": [
+     61,
+     97,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dw": 97,
+   "dh": 61
+  },
+  {
+   "kind": "lanczos",
+   "mode": "RGB",
+   "src": {
+    "file": "lz3_src.bin",
+    "shape": [
+     61,
+     97,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dst": {
+    "file": "lz3_dst.bin",
+    "shape": [
+     7,
+     13,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dw": 13,
+   "dh": 7
+  },
+  {
+   "kind": "lanczos",
+   "mode": "L",
+   "src": {
+    "file": "lz4_src.bin",
+    "shape": [
+     77,
+     211
+    ],
+    "dtype": "uint8"
+   },
+   "dst": {
+    "file": "lz4_dst.bin",
+    "shape": [
+     66,
+     180
+    ],
+    "dtype": "uint8"
+   },
+   "dw": 180,
+   "dh": 66
+  },
+  {
+   "kind": "lanczos",
+   "mode": "L",
+   "src": {
+    "file": "lz5_src.bin",
+    "shape": [
+     66,
+     180
+    ],
+    "dtype": "uint8"
+   },
+   "dst": {
+    "file": "lz5_dst.bin",
+    "shape": [
+     77,
+     211
+    ],
+    "dtype": "uint8"
+   },
+   "dw": 211,
+   "dh": 77
+  },
+  {
+   "kind": "lanczos",
+   "mode": "L",
+   "src": {
+    "file": "lz6_src.bin",
+    "shape": [
+     40,
+     300
+    ],
+    "dtype": "uint8"
+   },
+   "dst": {
+    "file": "lz6_dst.bin",
+    "shape": [
+     40,
+     299
+    ],
+    "dtype": "uint8"
+   },
+   "dw": 299,
+   "dh": 40
+  },
+  {
+   "kind": "lanczos",
+   "mode": "L",
+   "src": {
+    "file": "lz7_src.bin",
+    "shape": [
+     300,
+     64
+    ],
+    "dtype": "uint8"
+   },
+   "dst": {
+    "file": "lz7_dst.bin",
+    "shape": [
+     131,
+     64
+    ],
+    "dtype": "uint8"
+   },
+   "dw": 64,
+   "dh": 131
+  },
+  {
+   "kind": "lanczos",
+   "mode": "RGB",
+   "src": {
+    "file": "lz8_src.bin",
+    "shape": [
+     95,
+     279,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dst": {
+    "file": "lz8_dst.bin",
+    "shape": [
+     87,
+     256,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "dw": 256,
+   "dh": 87
+  },
+  {
+   "kind": "ellipse",
+   "k": 1,
+   "se": {
+    "file": "se1.bin",
+    "shape": [
+     1,
+     1
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 2,
+   "se": {
+    "file": "se2.bin",
+    "shape": [
+     2,
+     2
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 3,
+   "se": {
+    "file": "se3.bin",
+    "shape": [
+     3,
+     3
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 4,
+   "se": {
+    "file": "se4.bin",
+    "shape": [
+     4,
+     4
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 5,
+   "se": {
+    "file": "se5.bin",
+    "shape": [
+     5,
+     5
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 6,
+   "se": {
+    "file": "se6.bin",
+    "shape": [
+     6,
+     6
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 7,
+   "se": {
+    "file": "se7.bin",
+    "shape": [
+     7,
+     7
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 8,
+   "se": {
+    "file": "se8.bin",
+    "shape": [
+     8,
+     8
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 9,
+   "se": {
+    "file": "se9.bin",
+    "shape": [
+     9,
+     9
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 10,
+   "se": {
+    "file": "se10.bin",
+    "shape": [
+     10,
+     10
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 11,
+   "se": {
+    "file": "se11.bin",
+    "shape": [
+     11,
+     11
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 12,
+   "se": {
+    "file": "se12.bin",
+    "shape": [
+     12,
+     12
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 13,
+   "se": {
+    "file": "se13.bin",
+    "shape": [
+     13,
+     13
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 14,
+   "se": {
+    "file": "se14.bin",
+    "shape": [
+     14,
+     14
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 15,
+   "se": {
+    "file": "se15.bin",
+    "shape": [
+     15,
+     15
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 16,
+   "se": {
+    "file": "se16.bin",
+    "shape": [
+     16,
+     16
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 17,
+   "se": {
+    "file": "se17.bin",
+    "shape": [
+     17,
+     17
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 18,
+   "se": {
+    "file": "se18.bin",
+    "shape": [
+     18,
+     18
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 19,
+   "se": {
+    "file": "se19.bin",
+    "shape": [
+     19,
+     19
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 20,
+   "se": {
+    "file": "se20.bin",
+    "shape": [
+     20,
+     20
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 21,
+   "se": {
+    "file": "se21.bin",
+    "shape": [
+     21,
+     21
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 22,
+   "se": {
+    "file": "se22.bin",
+    "shape": [
+     22,
+     22
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 23,
+   "se": {
+    "file": "se23.bin",
+    "shape": [
+     23,
+     23
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 24,
+   "se": {
+    "file": "se24.bin",
+    "shape": [
+     24,
+     24
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 25,
+   "se": {
+    "file": "se25.bin",
+    "shape": [
+     25,
+     25
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 26,
+   "se": {
+    "file": "se26.bin",
+    "shape": [
+     26,
+     26
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 27,
+   "se": {
+    "file": "se27.bin",
+    "shape": [
+     27,
+     27
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 28,
+   "se": {
+    "file": "se28.bin",
+    "shape": [
+     28,
+     28
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 29,
+   "se": {
+    "file": "se29.bin",
+    "shape": [
+     29,
+     29
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 30,
+   "se": {
+    "file": "se30.bin",
+    "shape": [
+     30,
+     30
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 31,
+   "se": {
+    "file": "se31.bin",
+    "shape": [
+     31,
+     31
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 32,
+   "se": {
+    "file": "se32.bin",
+    "shape": [
+     32,
+     32
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 33,
+   "se": {
+    "file": "se33.bin",
+    "shape": [
+     33,
+     33
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 34,
+   "se": {
+    "file": "se34.bin",
+    "shape": [
+     34,
+     34
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 35,
+   "se": {
+    "file": "se35.bin",
+    "shape": [
+     35,
+     35
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 36,
+   "se": {
+    "file": "se36.bin",
+    "shape": [
+     36,
+     36
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 37,
+   "se": {
+    "file": "se37.bin",
+    "shape": [
+     37,
+     37
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 38,
+   "se": {
+    "file": "se38.bin",
+    "shape": [
+     38,
+     38
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 39,
+   "se": {
+    "file": "se39.bin",
+    "shape": [
+     39,
+     39
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 40,
+   "se": {
+    "file": "se40.bin",
+    "shape": [
+     40,
+     40
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 45,
+   "se": {
+    "file": "se45.bin",
+    "shape": [
+     45,
+     45
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 50,
+   "se": {
+    "file": "se50.bin",
+    "shape": [
+     50,
+     50
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 61,
+   "se": {
+    "file": "se61.bin",
+    "shape": [
+     61,
+     61
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 64,
+   "se": {
+    "file": "se64.bin",
+    "shape": [
+     64,
+     64
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 99,
+   "se": {
+    "file": "se99.bin",
+    "shape": [
+     99,
+     99
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "ellipse",
+   "k": 100,
+   "se": {
+    "file": "se100.bin",
+    "shape": [
+     100,
+     100
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "morph_src",
+   "src": {
+    "file": "morph_src.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "dilate",
+   "k": 1,
+   "dst": {
+    "file": "dil1.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "erode",
+   "k": 1,
+   "dst": {
+    "file": "ero1.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "dilate",
+   "k": 2,
+   "dst": {
+    "file": "dil2.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "erode",
+   "k": 2,
+   "dst": {
+    "file": "ero2.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "dilate",
+   "k": 3,
+   "dst": {
+    "file": "dil3.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "erode",
+   "k": 3,
+   "dst": {
+    "file": "ero3.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "dilate",
+   "k": 4,
+   "dst": {
+    "file": "dil4.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "erode",
+   "k": 4,
+   "dst": {
+    "file": "ero4.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "dilate",
+   "k": 7,
+   "dst": {
+    "file": "dil7.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "erode",
+   "k": 7,
+   "dst": {
+    "file": "ero7.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "dilate",
+   "k": 15,
+   "dst": {
+    "file": "dil15.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "erode",
+   "k": 15,
+   "dst": {
+    "file": "ero15.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "dilate",
+   "k": 30,
+   "dst": {
+    "file": "dil30.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "erode",
+   "k": 30,
+   "dst": {
+    "file": "ero30.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "dilate",
+   "k": 31,
+   "dst": {
+    "file": "dil31.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "erode",
+   "k": 31,
+   "dst": {
+    "file": "ero31.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "predilate",
+   "pd": 1,
+   "dst": {
+    "file": "pd1.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "predilate",
+   "pd": 5,
+   "dst": {
+    "file": "pd5.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "predilate",
+   "pd": 20,
+   "dst": {
+    "file": "pd20.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "trimap",
+   "kernel_size": 15,
+   "kernel_inward": 4,
+   "kernel_outward": 30,
+   "mid_bias": null,
+   "seed_clamp": 250,
+   "dst": {
+    "file": "tri0.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "trimap",
+   "kernel_size": 15,
+   "kernel_inward": null,
+   "kernel_outward": null,
+   "mid_bias": null,
+   "seed_clamp": 250,
+   "dst": {
+    "file": "tri1.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "trimap",
+   "kernel_size": 9,
+   "kernel_inward": 4,
+   "kernel_outward": 30,
+   "mid_bias": 0.7,
+   "seed_clamp": 255,
+   "dst": {
+    "file": "tri2.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "trimap",
+   "kernel_size": 15,
+   "kernel_inward": 6,
+   "kernel_outward": 12,
+   "mid_bias": 0.3,
+   "seed_clamp": 240,
+   "dst": {
+    "file": "tri3.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "trimap",
+   "kernel_size": 15,
+   "kernel_inward": 4,
+   "kernel_outward": 30,
+   "mid_bias": null,
+   "seed_clamp": 1,
+   "dst": {
+    "file": "tri4.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "trimap",
+   "kernel_size": 15,
+   "kernel_inward": 4,
+   "kernel_outward": 30,
+   "mid_bias": 0.5,
+   "seed_clamp": 254,
+   "dst": {
+    "file": "tri5.bin",
+    "shape": [
+     90,
+     120
+    ],
+    "dtype": "uint8"
+   }
+  },
+  {
+   "kind": "crop",
+   "W": 2048,
+   "H": 1080,
+   "bbox": [
+    527,
+    1021,
+    441,
+    1079
+   ],
+   "pad": 128,
+   "max_crop": 2048,
+   "box": [
+    399,
+    313,
+    1149,
+    1080
+   ],
+   "proc": [
+    750,
+    767
+   ],
+   "padded": [
+    768,
+    768
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 8192,
+   "H": 1080,
+   "bbox": [
+    2107,
+    4089,
+    441,
+    1079
+   ],
+   "pad": 128,
+   "max_crop": 2048,
+   "box": [
+    1979,
+    313,
+    4217,
+    1080
+   ],
+   "proc": [
+    2048,
+    702
+   ],
+   "padded": [
+    2048,
+    704
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 8192,
+   "H": 1080,
+   "bbox": [
+    2107,
+    4089,
+    441,
+    1079
+   ],
+   "pad": 128,
+   "max_crop": 1536,
+   "box": [
+    1979,
+    313,
+    4217,
+    1080
+   ],
+   "proc": [
+    1536,
+    526
+   ],
+   "padded": [
+    1536,
+    544
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 6144,
+   "H": 3240,
+   "bbox": [
+    1580,
+    3066,
+    1322,
+    3239
+   ],
+   "pad": 128,
+   "max_crop": 1536,
+   "box": [
+    1452,
+    1194,
+    3194,
+    3240
+   ],
+   "proc": [
+    1308,
+    1536
+   ],
+   "padded": [
+    1312,
+    1536
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 100,
+   "H": 100,
+   "bbox": [
+    0,
+    99,
+    0,
+    99
+   ],
+   "pad": 0,
+   "max_crop": 64,
+   "box": [
+    0,
+    0,
+    99,
+    99
+   ],
+   "proc": [
+    64,
+    64
+   ],
+   "padded": [
+    64,
+    64
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 100,
+   "H": 100,
+   "bbox": [
+    50,
+    50,
+    50,
+    50
+   ],
+   "pad": 128,
+   "max_crop": 2048,
+   "box": [
+    0,
+    0,
+    100,
+    100
+   ],
+   "proc": [
+    100,
+    100
+   ],
+   "padded": [
+    128,
+    128
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 3000,
+   "H": 1001,
+   "bbox": [
+    0,
+    2999,
+    0,
+    1000
+   ],
+   "pad": 0,
+   "max_crop": 2048,
+   "box": [
+    0,
+    0,
+    2999,
+    1000
+   ],
+   "proc": [
+    2048,
+    683
+   ],
+   "padded": [
+    2048,
+    704
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 1001,
+   "H": 3000,
+   "bbox": [
+    0,
+    1000,
+    0,
+    2999
+   ],
+   "pad": 0,
+   "max_crop": 2048,
+   "box": [
+    0,
+    0,
+    1000,
+    2999
+   ],
+   "proc": [
+    683,
+    2048
+   ],
+   "padded": [
+    704,
+    2048
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 4000,
+   "H": 2001,
+   "bbox": [
+    0,
+    3999,
+    0,
+    2000
+   ],
+   "pad": 0,
+   "max_crop": 1000,
+   "box": [
+    0,
+    0,
+    3999,
+    2000
+   ],
+   "proc": [
+    1000,
+    500
+   ],
+   "padded": [
+    1024,
+    512
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 2001,
+   "H": 4000,
+   "bbox": [
+    0,
+    2000,
+    0,
+    3999
+   ],
+   "pad": 0,
+   "max_crop": 1000,
+   "box": [
+    0,
+    0,
+    2000,
+    3999
+   ],
+   "proc": [
+    500,
+    1000
+   ],
+   "padded": [
+    512,
+    1024
+   ]
+  },
+  {
+   "kind": "crop",
+   "W": 5000,
+   "H": 2500,
+   "bbox": [
+    10,
+    4990,
+    10,
+    2490
+   ],
+   "pad": 5,
+   "max_crop": 1536,
+   "box": [
+    5,
+    5,
+    4995,
+    2495
+   ],
+   "proc": [
+    1536,
+    766
+   ],
+   "padded": [
+    1536,
+    768
+   ]
+  },
+  {
+   "kind": "hfnorm",
+   "img": {
+    "file": "hf_img.bin",
+    "shape": [
+     64,
+     96,
+     3
+    ],
+    "dtype": "uint8"
+   },
+   "tri": {
+    "file": "hf_tri.bin",
+    "shape": [
+     64,
+     96
+    ],
+    "dtype": "uint8"
+   },
+   "pv": {
+    "file": "hf_pv.bin",
+    "shape": [
+     1,
+     4,
+     64,
+     96
+    ],
+    "dtype": "float32"
+   }
+  }
+ ]
+}

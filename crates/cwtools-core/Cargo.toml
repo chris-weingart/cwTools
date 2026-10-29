@@ -1,0 +1,19 @@
+[package]
+name = "cwtools-core"
+version.workspace = true
+edition = "2021"
+description = "Shared OFX plumbing for the cwTools Flame plugins: FFI, suites, params DSL, images, colour, ORT session cache, HTTP, logging, panic guards"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+ureq = { version = "2.12", default-features = false }
+serde_json = "1"
+# Pinned: rc.10 targets the ONNX Runtime 1.22 C API (= Flame 2027.2's bundled
+# libonnxruntime.so.1.22.0). rc.11+ require 1.23 and would fail to load it.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "cuda", "std"] }
+
+[build-dependencies]
+cc = "1"
