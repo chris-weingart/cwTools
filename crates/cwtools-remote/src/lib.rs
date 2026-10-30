@@ -40,6 +40,11 @@ pub enum Data {
     Lut8 { idx: Vec<u8>, lut: Vec<[f32; 256]> },
     /// uint8 tensor, sent `zstd`.
     U8(Vec<u8>),
+    /// int64 tensor, sent `zstd`.
+    I64(Vec<i64>),
+    /// Tensors kept on the server (API 2 tensor store), concatenated along `axis`.
+    /// The shape of a `TensorIn` with refs is ignored (the server knows it).
+    Refs { handles: Vec<String>, axis: usize },
 }
 
 pub struct TensorIn {
@@ -93,6 +98,16 @@ impl TensorIn {
 
     pub fn numel(&self) -> usize {
         self.shape.iter().product()
+    }
+    /// Server-kept tensor(s) as this input: one handle, or several concatenated along `axis`.
+    pub fn refs(name: &str, handles: Vec<String>, axis: usize) -> TensorIn {
+        TensorIn { name: name.into(), shape: Vec::new(), data: Data::Refs { handles, axis } }
+    }
+    pub fn i64(name: &str, shape: &[usize], data: Vec<i64>) -> TensorIn {
+        TensorIn { name: name.into(), shape: shape.to_vec(), data: Data::I64(data) }
+    }
+    pub fn f32(name: &str, shape: &[usize], data: Vec<f32>) -> TensorIn {
+        TensorIn { name: name.into(), shape: shape.to_vec(), data: Data::F32(data) }
     }
 }
 
@@ -308,6 +323,12 @@ impl Blobs {
 }
 
 fn encode_tensor(t: &TensorIn, blobs: &mut Blobs, level: i32, webp: bool) -> Result<Value, String> {
+    if let Data::Refs { handles, axis } = &t.data {
+        if handles.is_empty() {
+            return Err(format!("{}: no refs", t.name));
+        }
+        return Ok(json!({"name": t.name, "refs": handles, "axis": axis}));
+    }
     if t.shape.is_empty() {
         return Err(format!("{}: scalar tensors are not supported", t.name));
     }
@@ -330,6 +351,16 @@ fn encode_tensor(t: &TensorIn, blobs: &mut Blobs, level: i32, webp: bool) -> Res
             d["codec"] = json!("zstd");
             d["data"] = blobs.push(&zstd_c(v, level)?);
         }
+        Data::I64(v) => {
+            if v.len() != n {
+                return Err(format!("{}: {} values for shape {:?}", t.name, v.len(), t.shape));
+            }
+            let raw: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            d["dtype"] = json!("int64");
+            d["codec"] = json!("zstd");
+            d["data"] = blobs.push(&zstd_c(&raw, level)?);
+        }
+        Data::Refs { .. } => unreachable!("handled above"),
         Data::Lut8 { idx, lut } => {
             if idx.len() != n || t.shape.len() < 3 || lut.len() != t.shape[1] {
                 return Err(format!("{}: lut8 needs idx of {n} values and {} tables", t.name, t.shape.get(1).unwrap_or(&0)));
@@ -484,15 +515,25 @@ pub struct Ep {
     /// "heuristic" | "default" | "exhaustive"
     pub conv_search: &'static str,
     pub conv_max_workspace: bool,
+    /// "cuda" | "cpu" (API 2; "cpu" = the model runs on the server's CPU, as locally)
+    pub device: &'static str,
 }
 impl Ep {
     /// cwRefine (ViTMatte core): heuristic search, max workspace, fp32 / tf32.
     pub fn vitmatte(tf32: bool) -> Ep {
-        Ep { precision: if tf32 { "tf32" } else { "fp32" }, conv_search: "heuristic", conv_max_workspace: true }
+        Ep { precision: if tf32 { "tf32" } else { "fp32" }, conv_search: "heuristic", conv_max_workspace: true, device: "cuda" }
     }
     /// cwMatte (BiRefNet): default (implicit GEMM) search, capped workspace, fp32 math.
     pub fn birefnet() -> Ep {
-        Ep { precision: "fp32", conv_search: "default", conv_max_workspace: false }
+        Ep { precision: "fp32", conv_search: "default", conv_max_workspace: false, device: "cuda" }
+    }
+    /// cwSegment SAM3 graphs: onnxruntime's CUDA defaults (TF32, exhaustive search, max workspace).
+    pub fn sam3() -> Ep {
+        Ep { precision: "tf32", conv_search: "exhaustive", conv_max_workspace: true, device: "cuda" }
+    }
+    /// cwSegment's text encoder: CPU, as locally.
+    pub fn sam3_cpu() -> Ep {
+        Ep { device: "cpu", ..Ep::sam3() }
     }
 }
 
@@ -504,8 +545,11 @@ pub struct Request {
     pub sha256: String,
     pub inputs: Vec<TensorIn>,
     pub ep: Option<Ep>,
-    /// Output names to return (None = all).
+    /// Output names to return (None = all; Some(empty) = none).
     pub outputs: Option<Vec<String>>,
+    /// (output name, handle): keep these outputs in the server's tensor store (API 2)
+    /// for later requests (`TensorIn::refs`, `fetch`); only `outputs` are downloaded.
+    pub keep: Vec<(String, String)>,
     /// Some("float16") = halve the download (LOSSY); None = native dtype (lossless).
     pub output_dtype: Option<&'static str>,
     /// Some("u8_trunc255") = the server returns float outputs as uint8
@@ -546,11 +590,13 @@ impl Response {
 
 /// Error from the server or transport. `code` = server error code
 /// ("sha_mismatch", "gpu_oom", "busy", "nonfinite_output", ...) or "transport".
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RemoteError {
     pub status: u16,
     pub code: String,
     pub msg: String,
+    /// `ref_missing`: the handles the server no longer has.
+    pub missing: Vec<String>,
 }
 impl std::fmt::Display for RemoteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -563,7 +609,7 @@ impl std::fmt::Display for RemoteError {
 }
 
 fn local_err(code: &str, msg: impl Into<String>) -> RemoteError {
-    RemoteError { status: 0, code: code.into(), msg: msg.into() }
+    RemoteError { status: 0, code: code.into(), msg: msg.into(), missing: Vec::new() }
 }
 
 pub fn agent() -> &'static ureq::Agent {
@@ -598,6 +644,7 @@ fn status_err(e: ureq::Error) -> RemoteError {
                 status: code,
                 code: v["code"].as_str().unwrap_or("http").to_string(),
                 msg: v["error"].as_str().map(|s| s.to_string()).unwrap_or_else(|| body.chars().take(200).collect()),
+                missing: v["missing"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
             }
         }
         ureq::Error::Transport(t) => transport_err(&t),
@@ -653,6 +700,12 @@ pub fn infer(server: &str, req: &Request) -> Result<Response, RemoteError> {
     let mut h = json!({"model": req.model, "sha256": req.sha256, "inputs": descs});
     if let Some(ep) = &req.ep {
         h["ep"] = json!({"precision": ep.precision, "conv_search": ep.conv_search, "conv_max_workspace": ep.conv_max_workspace});
+        if ep.device != "cuda" {
+            h["ep"]["device"] = json!(ep.device);
+        }
+    }
+    if !req.keep.is_empty() {
+        h["keep"] = Value::Object(req.keep.iter().map(|(o, k)| (o.clone(), json!(k))).collect());
     }
     if let Some(o) = &req.outputs {
         h["outputs"] = json!(o);
@@ -704,6 +757,68 @@ pub fn infer(server: &str, req: &Request) -> Result<Response, RemoteError> {
         server: hdr["timings_ms"].clone(),
     };
     Ok(Response { outputs, header: hdr, timings })
+}
+
+/// One kept tensor to download with [`fetch`]: `index` = only these indices along `axis`.
+pub struct FetchItem {
+    pub handle: String,
+    pub axis: usize,
+    pub index: Option<Vec<usize>>,
+}
+
+/// POST `/fetch` (API 2): kept tensors (or a selection along an axis), in request order.
+pub fn fetch(server: &str, items: &[FetchItem], timeout_s: f64) -> Result<Vec<TensorOut>, RemoteError> {
+    no_server(server)?;
+    let t: Vec<Value> = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            let mut d = json!({"ref": it.handle, "axis": it.axis, "name": format!("t{i}")});
+            if let Some(ix) = &it.index {
+                d["index"] = json!(ix);
+            }
+            d
+        })
+        .collect();
+    let body = pack(&json!({"tensors": t}), &[]);
+    let r = agent()
+        .post(&format!("{}/fetch", base(server)))
+        .timeout(Duration::from_secs_f64(timeout_s.max(1.0)))
+        .set("Content-Type", CONTENT_TYPE)
+        .send_bytes(&body)
+        .map_err(status_err)?;
+    let mut out = Vec::new();
+    r.into_reader().take(1 << 31).read_to_end(&mut out).map_err(io_err)?;
+    let (hdr, area) = unpack(&out).map_err(|e| local_err("bad_response", e))?;
+    let mut res = Vec::new();
+    for d in hdr["outputs"].as_array().ok_or_else(|| local_err("bad_response", "no outputs"))? {
+        let t = decode_tensor(d, area).map_err(|e| local_err("bad_response", e))?;
+        if t.data.iter().any(|v| !v.is_finite()) {
+            return Err(local_err("nonfinite_output", format!("{}: NaN/Inf in the response", t.name)));
+        }
+        res.push(t);
+    }
+    if res.len() != items.len() {
+        return Err(local_err("bad_response", format!("{} tensors for {} requested", res.len(), items.len())));
+    }
+    Ok(res)
+}
+
+/// POST `/forget` (API 2): drop kept tensors by handle prefix (Some) or by handle list.
+pub fn forget(server: &str, prefix: Option<&str>, handles: &[String], timeout_s: f64) -> Result<u64, RemoteError> {
+    no_server(server)?;
+    let body = match prefix {
+        Some(p) => json!({"prefix": p}),
+        None => json!({"handles": handles}),
+    };
+    let r = agent()
+        .post(&format!("{}/forget", base(server)))
+        .timeout(Duration::from_secs_f64(timeout_s.max(0.5)))
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(status_err)?;
+    let v: Value = serde_json::from_str(&r.into_string().map_err(io_err)?).map_err(|e| local_err("bad_json", e.to_string()))?;
+    Ok(v["forgotten"].as_u64().unwrap_or(0))
 }
 
 // ---------------------------------------------------------------------------

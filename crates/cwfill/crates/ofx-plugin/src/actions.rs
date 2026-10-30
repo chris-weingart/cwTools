@@ -65,13 +65,15 @@ pub fn action_describe(effect_handle: OfxImageEffectHandle) -> OfxStatus {
     // future revisit once General-context inputs are proven in Flame.)
     prop_set_string(props, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter);
 
-    // Float and half. A 16-bit half source used to be upconverted to float by
-    // Flame, so the result came out 32-bit. Half buffers are converted to f32
+    // Float, half, 16-bit and 8-bit. Non-float buffers are converted to f32
     // for the solve and back on output (render.rs); never read as f32 in place
-    // (the defocus lesson). The host gives both clips the same depth, so 16-bit
-    // in = 16-bit out and 32-bit in = 32-bit out.
+    // (the defocus lesson). Flame gives all clips one depth, and
+    // getClipPreferences asks for the Source's, so the result has the plate's
+    // bit depth (only declaring half was not enough: Flame then chose float).
     prop_set_string(props, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat);
     prop_set_string(props, kOfxImageEffectPropSupportedPixelDepths, 1, kOfxBitDepthHalf);
+    prop_set_string(props, kOfxImageEffectPropSupportedPixelDepths, 2, b"OfxBitDepthShort\0");
+    prop_set_string(props, kOfxImageEffectPropSupportedPixelDepths, 3, b"OfxBitDepthByte\0");
 
     // Global multilevel solve — no tiling.
     prop_set_int(props, kOfxImageEffectPropSupportsTiles, 0, 0);
@@ -110,13 +112,16 @@ pub fn action_describe_in_context(
 }
 
 pub fn action_get_clip_preferences(
-    _effect_handle: OfxImageEffectHandle,
+    effect_handle: OfxImageEffectHandle,
     out_args: OfxPropertySetHandle,
 ) -> OfxStatus {
     // Explicitly demand RGBA on both clips (spec: out-args keyed per clip
-    // name). Depth is left to the host (float or half, see describe).
+    // name), at the Source's depth (16-bit in = 16-bit out, 8-bit = 8-bit).
     prop_set_string(out_args, b"OfxImageClipPropComponents_Source\0", 0, kOfxImageComponentRGBA);
     prop_set_string(out_args, b"OfxImageClipPropComponents_Output\0", 0, kOfxImageComponentRGBA);
+    let depth = crate::render::Depth::of_source(effect_handle).ofx();
+    prop_set_string(out_args, b"OfxImageClipPropDepth_Source\0", 0, depth);
+    prop_set_string(out_args, b"OfxImageClipPropDepth_Output\0", 0, depth);
     kOfxStatOK
 }
 

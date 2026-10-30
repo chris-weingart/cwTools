@@ -1,9 +1,9 @@
-# cwtools-infer: remote inference server (cwRefine / cwMatte Remote mode)
+# cwtools-infer: remote inference server (cwSegment / cwRefine / cwMatte Remote mode)
 
-cwtools-infer runs the models of cwRefine and cwMatte on a separate GPU machine, so a Flame
-workstation can refine big crops without spending its own VRAM. Set a node's **Device** to
-**Remote** and point `remote_server` in `cwtools.conf` (or the node's Server URL) at
-`http://<server>:<port>`.
+cwtools-infer runs the models of cwSegment, cwRefine and cwMatte on a separate GPU machine, so
+a Flame workstation can segment, track and refine without spending its own VRAM. Set a node's
+**Device** to **Remote** and point `remote_server` in `cwtools.conf` (or the node's Server URL)
+at `http://<server>:<port>`.
 
 - Install: `install/install.sh --server` (Linux + NVIDIA GPU). It creates the venv, copies the
   models, builds the integrity references, writes `cwtools-infer.env` and a systemd unit.
@@ -37,12 +37,14 @@ editing):
 | `CWINFER_LOG_DIR` | `<models>/..` | log file `server_<port>.log` |
 | `CWINFER_STARTUP_CANARY` | `vitmatte_core,BiRefNet-general-bb_swin_v1_tiny-epoch_232_gs` | models loaded and canary-checked at startup (empty = none) |
 | `CWINFER_IDLE_S` | `600` | release a model after this many idle seconds |
-| `CWINFER_MAX_SESSIONS` | `2` | models loaded at once (least recently used goes first) |
+| `CWINFER_MAX_SESSIONS` | `3` | model families loaded at once (least recently used goes first; the graphs of one family, e.g. cwSegment's SAM3 graphs, share a slot). 3 = SAM3 + one BiRefNet + ViTMatte/MEMatte, the full cwSegment → cwMatte → cwRefine chain without reloads (measured on a 24 GB GPU: ~3.5 GB between frames, ~8.5 GB peak during a BiRefNet HR 2048 run); lower it on GPUs too small for that |
 | `CWINFER_MAX_QUEUE` | `8` | waiting requests before 503 `busy` |
 | `CWINFER_SHRINK` | `1` | shrink the CUDA arena after every run (`0` = off) |
 | `CWINFER_GPU_MEM_LIMIT_GB` | `48` | per-session CUDA arena cap |
 | `CWINFER_MAX_BODY_MB` | `512` | request size limit |
 | `CWINFER_OUT_LEVEL` | `3` | default zstd level for outputs |
+| `CWINFER_STORE_MB` | `4096` | RAM for kept tensors (tensor store, API 2); least recently used go first |
+| `CWINFER_STORE_IDLE_S` | `1800` | drop a kept tensor after this many seconds unused |
 
 At startup the server logs the address, the allow-list and a warning when it listens on a
 network address but only loopback clients are allowed (nobody could connect), or when the
@@ -65,14 +67,16 @@ you get HTTP 409 `sha_mismatch`, never a silently different result.
 |---|---|---|
 | GET | `/health` | status, VRAM, loaded sessions, queue, startup canary result |
 | GET | `/models` | every model in the folder: name, sha256, inputs/outputs (name, dtype, shape), weight precision, sidecar JSON, EP defaults, state |
-| POST | `/infer` | run one model on CWT1 tensors, returns CWT1 tensors |
+| POST | `/infer` | run one model on CWT1 tensors (or kept tensors), returns CWT1 tensors |
+| POST | `/fetch` | download kept tensors, optionally only some indices along an axis (API 2) |
+| POST | `/forget` | drop kept tensors by handle prefix or list (API 2) |
 | POST | `/release` | drop all loaded sessions now (frees VRAM) |
 | POST | `/rescan` | force a model-folder rescan (it also happens automatically) |
 
 ### `GET /models`
 
 ```json
-{"ok":true,"api":1,"models":[
+{"ok":true,"api":2,"models":[
   {"name":"vitmatte_core","family":"vitmatte","file":"vitmatte_core.onnx","sha256":"ea4484…",
    "size":387731564,"precision":"fp32",
    "inputs":[{"name":"pixel_values","dtype":"float32","shape":[1,4,"h","w"]}],
@@ -95,7 +99,7 @@ you get HTTP 409 `sha_mismatch`, never a silently different result.
 ### `GET /health`
 
 ```json
-{"ok":true,"api":1,"service":"cwtools-infer","uptime_s":33,"onnxruntime":"1.22.0",
+{"ok":true,"api":2,"service":"cwtools-infer","uptime_s":33,"onnxruntime":"1.22.0",
  "vram":{"gpu_used_mb":12145,"gpu_total_mb":97887,"gpu_free_mb":85742,"process_mb":610},
  "sessions":[{"model":"vitmatte_core","ep":"fp32/heuristic/ws-max","idle_s":12,"runs":40,
               "load_ms":1712,"canary":{"max_diff":1.8e-07,"tol":0.002,"pass":true}}],
@@ -144,16 +148,42 @@ Request header:
 | `model` | required. Name from `/models`. |
 | `sha256` | required. sha256 of the model file the plugin would run locally. Mismatch → 409. |
 | `inputs` | required. One tensor per model input (names, dtypes and static dims must match). |
-| `ep` | optional. CUDA EP options, part of the session key. Default = `ep_defaults` of the model's family, which equal what the plugins use locally: ViTMatte `fp32/heuristic/max workspace` (cwRefine "GPU Math TF32" → `precision:"tf32"`), BiRefNet `fp32/default/capped workspace`. |
+| `ep` | optional. CUDA EP options, part of the session key. Default = `ep_defaults` of the model's family, which equal what the plugins use locally: ViTMatte `fp32/heuristic/max workspace` (cwRefine "GPU Math TF32" → `precision:"tf32"`), BiRefNet `fp32/default/capped workspace`, SAM3 `tf32/exhaustive/max workspace` (onnxruntime's CUDA defaults). `device:"cpu"` (API 2) runs the model on the server's CPU, as cwSegment runs its text encoder locally. |
+| `keep` | optional (API 2). `{output name: handle}`: keep these outputs in the tensor store for later requests. Only `outputs` are downloaded, so `"outputs": []` with `keep` downloads nothing. |
 | `outputs` | optional. Subset of output names (default all). |
 | `output_dtype` | optional. `float32` (default, native, lossless) or `float16` (**lossy**, halves the download). |
 | `output_codec` | optional. `xor-shuf-zstd` (default), `zstd`, `raw`. |
 | `output_quantize` | optional. `u8_trunc255`: float outputs come back as uint8 `clip(x * 255, 0, 255)` truncated, codec `grad-zstd`. That is exactly the 8-bit production recipe's `alpha_to_u8` (`astype(uint8)`), ~20× smaller (800×800 alphas: 575 KB → 29 KB); used by the parity tooling. The nodes ask for native float (cwRefine keeps sub-1/255 hair levels; cwMatte needs the float logits). |
 | `output_level` | optional. zstd level for outputs (default 3; 9 / 19 save only 4-8%). |
 
-Response header: `{"ok":true,"api":1,"model":…,"sha256":…,"ep":{…},"outputs":[tensors],
+Response header: `{"ok":true,"api":2,"model":…,"sha256":…,"ep":{…},"outputs":[tensors],
 "timings_ms":{"decode","queue","load","run","encode","total"}}`. `load` is non-zero when this
 request had to load the model (first use or after the idle release).
+
+### Tensor store (API 2)
+
+An input may name kept tensors instead of carrying data:
+
+```json
+{"name": "mem_feats", "refs": ["h1", "h2", "h3"], "axis": 0}
+```
+
+One handle is that tensor; several are concatenated along `axis` (default 0). Handles are the
+client's strings (1-200 characters); cwSegment prefixes them per Flame process, e.g.
+`cws1a2b/e/7/image_embed` (encoder features of a frame) and `cws1a2b/t/<node>/<session>/<frame>/<object>`
+(tracker memory). Every kept tensor carries a CRC-32 checked on every use: a mismatch (memory
+fault) drops it and is reported like a missing one. A missing handle (evicted, idle-dropped,
+server restarted) answers HTTP 409 `ref_missing` with `"missing": [handles]`, and the client
+recomputes it (encoder features) or asks the artist to start over (tracking memory).
+
+`POST /fetch` (CWT1 body, header only): `{"tensors": [{"ref": h, "name": n, "axis": 1, "index": [3, 17]}]}`
+returns the kept tensors (`index` = only those entries along `axis`), CWT1 like `/infer`.
+cwSegment keeps the detector's 200 masks and fetches only those above Detect Thresh.
+
+`POST /forget` (JSON): `{"prefix": "cws1a2b/t/4/9/"}` or `{"handles": [...]}` → `{"ok":true,"forgotten":n}`.
+
+`GET /health` (API 2) adds `"features": ["refs","keep","fetch","device"]` and `"store"`
+(tensors, MB, hits, misses, evictions, CRC failures).
 
 ### Codecs (all lossless)
 
@@ -189,6 +219,7 @@ JSON `{"ok":false,"code":"…","error":"…"}`:
 | 403 | `forbidden` | client address not in `CWINFER_ALLOW` |
 | 404 | `unknown_model`, `not_found` | |
 | 409 | `sha_mismatch` | client and server have different model files (or `no_manifest`) |
+| 409 | `ref_missing` | a kept tensor is gone (`missing` lists the handles) |
 | 413 | `too_large` | body larger than `CWINFER_MAX_BODY_MB` |
 | 500 | `sha_mismatch` (server-side: file on disk ≠ manifest), `nonfinite_weights`, `canary_failed`, `nonfinite_output`, `run_failed`, `no_cuda` | integrity / runtime failures; the model is not served |
 | 503 | `busy` (queue full), `gpu_oom` | retry later (`Retry-After: 2`); on OOM the session is released |
@@ -213,7 +244,7 @@ Guards against silent corruption (bit flips in RAM without ECC, bad disks, damag
 
 ## GPU etiquette
 
-- Models load on demand. At most `CWINFER_MAX_SESSIONS` (2) sessions; the least recently used
+- Models load on demand. At most `CWINFER_MAX_SESSIONS` (3) model families; the least recently used
   is released first. A session idle for `CWINFER_IDLE_S` (600 s) is released.
 - One load / inference at a time (FIFO lock). Up to `CWINFER_MAX_QUEUE` (8) requests wait; more → 503 `busy`.
 - The CUDA arena shrinks back after every run (`memory.enable_memory_arena_shrinkage`), so VRAM
@@ -233,22 +264,25 @@ curl http://127.0.0.1:8201/health
 
 By hand: `env CWINFER_HOST=… CWINFER_ALLOW=… venv/bin/python server/cwinfer_server.py`.
 
-Install layout: `<root>/{server/, venv/, models/{vitmatte,mematte,birefnet}/, canary/, logs/, cwtools-infer.env}`.
+Install layout: `<root>/{server/, venv/, models/{vitmatte,mematte,birefnet,sam3}/, canary/, logs/, cwtools-infer.env}`.
 venv: Python ≥ 3.10, onnxruntime-gpu 1.22.0, nvidia-cudnn-cu12 9.x, nvidia-cublas-cu12 12.x,
 numpy, zstandard, onnx, pillow, nvidia-ml-py (see `server/requirements.txt`).
 
 Adding a model: copy `<stem>.onnx` (+ `.json`) into `models/<family>/`, add its line to that
 folder's `SHA256SUMS` (use the published checksum, not one computed on the server, so a copy
 that was damaged on the way is caught), run `venv/bin/python server/make_canary.py <stem>`
-(optional but recommended). It is served on the next request. Families with plugin-matching EP
-defaults: `vitmatte`, `mematte` (cwRefine cores), `birefnet`.
+(optional but recommended; graphs without image-like inputs, such as the SAM3 decoder,
+detector and tracker, have no canary recipe and are skipped). It is served on the next request.
+Families with plugin-matching EP defaults: `vitmatte`, `mematte` (cwRefine cores), `birefnet`,
+`sam3` (cwSegment).
 
 Test a running server: `venv/bin/python server/client_test.py http://<host>:<port>`.
 
 ## Client
 
 Rust: crate `cwtools-remote` (`crates/cwtools-remote`): `infer(server, &Request)`,
-`TensorIn::lut8_from_source` / `f32_auto`, `Ep::vitmatte(tf32)` / `Ep::birefnet()`,
+`TensorIn::lut8_from_source` / `f32_auto` / `refs` / `i64`, `Request::keep`, `fetch`, `forget`,
+`Ep::vitmatte(tf32)` / `Ep::birefnet()` / `Ep::sam3()` / `Ep::sam3_cpu()`,
 `model_sha256(path)` (reads the `SHA256SUMS` next to the model, else hashes the file),
 `get_json(server, "/health" | "/models")`. Test / parity tool: `crates/cwremote-parity`
 (`cwremote refine|matte|health|models`).

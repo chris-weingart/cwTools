@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cwTools remote inference server (Remote mode of cwRefine / cwMatte).
+"""cwTools remote inference server (Remote mode of cwRefine / cwMatte / cwSegment).
 
 Runs the SAME ONNX files the plugins run locally, with the same onnxruntime
 version (1.22) and the same CUDA EP options, on the server's GPU. The plugin
@@ -21,12 +21,19 @@ GPU etiquette (shared card): models load on demand, an LRU keeps at most
 CWINFER_MAX_SESSIONS sessions, sessions idle for CWINFER_IDLE_S are released,
 one inference runs at a time (FIFO), the CUDA arena shrinks after every run.
 
+Tensor store (API 2): a request may keep outputs on the server under
+client-chosen handles ("keep") and feed earlier kept tensors as inputs
+("refs", concatenated along an axis). cwSegment keeps the SAM3 encoder
+features and the tracker's per-frame memory here, so only the frame goes up
+and small masks come back; its memory-bank bookkeeping stays in the plugin.
+
 Config (env): CWINFER_HOST (127.0.0.1), CWINFER_PORT (8201),
 CWINFER_ALLOW (127.0.0.0/8,::1/128), CWINFER_MODELS (~/cwtools_infer/models), CWINFER_CANARY
-(<models>/../canary), CWINFER_IDLE_S (600), CWINFER_MAX_SESSIONS (2),
+(<models>/../canary), CWINFER_IDLE_S (600), CWINFER_MAX_SESSIONS (3),
 CWINFER_MAX_QUEUE (8), CWINFER_SHRINK (1), CWINFER_GPU_MEM_LIMIT_GB (48),
 CWINFER_STARTUP_CANARY (vitmatte_core,BiRefNet-general-bb_swin_v1_tiny-epoch_232_gs),
-CWINFER_MAX_BODY_MB (512), CWINFER_OUT_LEVEL (3), CWINFER_LOG_DIR (<models>/..)
+CWINFER_MAX_BODY_MB (512), CWINFER_OUT_LEVEL (3), CWINFER_LOG_DIR (<models>/..),
+CWINFER_STORE_MB (4096), CWINFER_STORE_IDLE_S (1800)
 """
 from __future__ import annotations
 
@@ -40,6 +47,7 @@ import sys
 import threading
 import time
 import traceback
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -50,13 +58,13 @@ sys.path.insert(0, str(HERE))
 import cwtensor as ct  # noqa: E402
 import netallow  # noqa: E402
 
-API_VERSION = 1
+API_VERSION = 2
 HOST = os.environ.get("CWINFER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CWINFER_PORT", "8201"))
 MODELS = Path(os.path.expanduser(os.environ.get("CWINFER_MODELS", "~/cwtools_infer/models")))
 CANARY = Path(os.path.expanduser(os.environ.get("CWINFER_CANARY", str(MODELS.parent / "canary"))))
 IDLE_S = float(os.environ.get("CWINFER_IDLE_S", "600"))
-MAX_SESSIONS = int(os.environ.get("CWINFER_MAX_SESSIONS", "2"))
+MAX_SESSIONS = int(os.environ.get("CWINFER_MAX_SESSIONS", "3"))
 MAX_QUEUE = int(os.environ.get("CWINFER_MAX_QUEUE", "8"))
 SHRINK = os.environ.get("CWINFER_SHRINK", "1") != "0"
 GPU_MEM_LIMIT = int(float(os.environ.get("CWINFER_GPU_MEM_LIMIT_GB", "48")) * (1 << 30))
@@ -64,6 +72,8 @@ STARTUP_CANARY = [s for s in os.environ.get(
     "CWINFER_STARTUP_CANARY", "vitmatte_core,BiRefNet-general-bb_swin_v1_tiny-epoch_232_gs").split(",") if s.strip()]
 OUT_LEVEL = int(os.environ.get("CWINFER_OUT_LEVEL", "3"))
 MAX_BODY = int(float(os.environ.get("CWINFER_MAX_BODY_MB", "512")) * (1 << 20))
+STORE_MB = float(os.environ.get("CWINFER_STORE_MB", "4096"))
+STORE_IDLE_S = float(os.environ.get("CWINFER_STORE_IDLE_S", "1800"))
 ALLOW_SPEC = os.environ.get("CWINFER_ALLOW", netallow.DEFAULT_ALLOW)
 try:
     ALLOWED_NETS = netallow.parse_allow(ALLOW_SPEC)
@@ -97,21 +107,24 @@ except Exception as exc:  # noqa: BLE001 — logged; the CUDA EP check below fai
 # (cwrefine/src/local.rs, cwmatte/src/local.rs). A request may override them
 # (field "ep"); they are part of the session key.
 EP_DEFAULTS = {
-    "vitmatte": {"precision": "fp32", "conv_search": "heuristic", "conv_max_workspace": True},
+    "vitmatte": {"precision": "fp32", "conv_search": "heuristic", "conv_max_workspace": True, "device": "cuda"},
     # MEMatte core: same contract and Local session setup as ViTMatte (cwRefine Model menu).
-    "mematte": {"precision": "fp32", "conv_search": "heuristic", "conv_max_workspace": True},
-    "birefnet": {"precision": "fp32", "conv_search": "default", "conv_max_workspace": False},
+    "mematte": {"precision": "fp32", "conv_search": "heuristic", "conv_max_workspace": True, "device": "cuda"},
+    "birefnet": {"precision": "fp32", "conv_search": "default", "conv_max_workspace": False, "device": "cuda"},
+    # cwSegment (cwsegment/src/local.rs key_for): onnxruntime's CUDA defaults. Its text
+    # encoder runs on the CPU locally; the plugin asks for device "cpu" for it.
+    "sam3": {"precision": "tf32", "conv_search": "exhaustive", "conv_max_workspace": True, "device": "cuda"},
 }
-EP_FALLBACK = {"precision": "fp32", "conv_search": "heuristic", "conv_max_workspace": True}
+EP_FALLBACK = {"precision": "fp32", "conv_search": "heuristic", "conv_max_workspace": True, "device": "cuda"}
 _SEARCH = {"heuristic": "HEURISTIC", "default": "DEFAULT", "exhaustive": "EXHAUSTIVE"}
 _ORT_TYPES = {"tensor(float)": "float32", "tensor(float16)": "float16", "tensor(uint8)": "uint8",
               "tensor(int64)": "int64", "tensor(int32)": "int32", "tensor(bool)": "bool"}
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, msg: str):
+    def __init__(self, status: int, code: str, msg: str, extra: dict | None = None):
         super().__init__(msg)
-        self.status, self.code, self.msg = status, code, msg
+        self.status, self.code, self.msg, self.extra = status, code, msg, extra or {}
 
 
 # ──────────────────────────────────────────────────────────── integrity ──
@@ -299,17 +312,22 @@ def norm_ep(m: Model, req_ep: dict | None) -> dict:
     ep = m.ep_defaults()
     for k, v in (req_ep or {}).items():
         if k not in ep:
-            raise ApiError(400, "bad_request", f"unknown ep option {k!r} (precision, conv_search, conv_max_workspace)")
+            raise ApiError(400, "bad_request",
+                           f"unknown ep option {k!r} (precision, conv_search, conv_max_workspace, device)")
         ep[k] = v
     if ep["precision"] not in ("fp32", "tf32"):
         raise ApiError(400, "bad_request", "ep.precision must be fp32 or tf32")
     if ep["conv_search"] not in _SEARCH:
         raise ApiError(400, "bad_request", "ep.conv_search must be heuristic, default or exhaustive")
+    if ep["device"] not in ("cuda", "cpu"):
+        raise ApiError(400, "bad_request", "ep.device must be cuda or cpu")
     ep["conv_max_workspace"] = bool(ep["conv_max_workspace"])
     return ep
 
 
 def ep_key(ep: dict) -> str:
+    if ep.get("device") == "cpu":
+        return "cpu"
     return f"{ep['precision']}/{ep['conv_search']}/{'ws-max' if ep['conv_max_workspace'] else 'ws-capped'}"
 
 
@@ -384,9 +402,11 @@ class Sessions:
             "use_tf32": "1" if ep["precision"] == "tf32" else "0",
             "gpu_mem_limit": str(GPU_MEM_LIMIT),
         }
-        sess = ort.InferenceSession(raw, so, providers=[("CUDAExecutionProvider", cuda)])
+        on_cpu = ep.get("device") == "cpu"
+        sess = ort.InferenceSession(raw, so, providers=["CPUExecutionProvider"] if on_cpu
+                                    else [("CUDAExecutionProvider", cuda)])
         del raw
-        if sess.get_providers()[0] != "CUDAExecutionProvider":
+        if not on_cpu and sess.get_providers()[0] != "CUDAExecutionProvider":
             raise ApiError(500, "no_cuda", f"{m.name}: CUDA EP not active ({sess.get_providers()})")
         load_ms = (time.perf_counter() - t0) * 1e3
         e = Entry(m, ep, sess, load_ms, None)
@@ -446,15 +466,24 @@ class Sessions:
                     self.gpu.release()
 
     def get(self, m: Model, ep: dict) -> tuple[Entry, float]:
-        """Caller must hold self.gpu."""
+        """Caller must hold self.gpu. MAX_SESSIONS counts model FAMILIES: the graphs of
+        one family (cwSegment's SAM3 encoder, detector, decoder, tracker) share a slot,
+        so one tool's pipeline never evicts its own graphs."""
         key = (m.name, m.sha, ep_key(ep))
         with self.lock:
             e = self.entries.get(key)
             if e is not None:
                 self.entries.move_to_end(key)
                 return e, 0.0
-            over = max(0, len(self.entries) + 1 - MAX_SESSIONS)
-            victims = list(self.entries)[:over]
+            fams: list[str] = []  # least recently used first
+            for x in self.entries.values():
+                if x.model.family in fams:
+                    fams.remove(x.model.family)
+                fams.append(x.model.family)
+            victims = []
+            if m.family not in fams:
+                drop = fams[:max(0, len(fams) + 1 - MAX_SESSIONS)]
+                victims = [k for k, x in self.entries.items() if x.model.family in drop]
         for k in victims:
             self.release(k)
         self.ensure_keeper()
@@ -466,11 +495,119 @@ class Sessions:
     def snapshot(self):
         now = time.time()
         with self.lock:
-            return [{"model": e.model.name, "ep": ep_key(e.ep), "idle_s": round(now - e.last), "runs": e.runs,
+            return [{"model": e.model.name, "family": e.model.family, "ep": ep_key(e.ep), "idle_s": round(now - e.last), "runs": e.runs,
                      "load_ms": round(e.load_ms), "canary": e.canary} for e in self.entries.values()]
 
 
 SESSIONS = Sessions()
+
+
+# ─────────────────────────────────────────────────────────── tensor store ──
+class TensorStore:
+    """Outputs kept on the server between requests, by client-chosen handle.
+    LRU within CWINFER_STORE_MB, dropped after CWINFER_STORE_IDLE_S unused. Each
+    entry carries a CRC-32 checked on every use: a flipped bit (non-ECC RAM) makes
+    it 'missing', so the client recomputes it instead of using damaged data."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.items: "collections.OrderedDict[str, tuple[np.ndarray, int, float]]" = collections.OrderedDict()
+        self.bytes = 0
+        self.cap = int(STORE_MB * (1 << 20))
+        self.hits = self.misses = self.evicted = self.corrupt = 0
+
+    @staticmethod
+    def _crc(a: np.ndarray) -> int:
+        return zlib.crc32(memoryview(a).cast("B"))
+
+    def put(self, handle: str, a: np.ndarray):
+        if not isinstance(handle, str) or not 0 < len(handle) <= 200:
+            raise ApiError(400, "bad_request", "keep handles are strings of 1-200 characters")
+        a = np.ascontiguousarray(a)
+        if a.nbytes > self.cap:
+            raise ApiError(413, "too_large", f"output of {a.nbytes >> 20} MB exceeds CWINFER_STORE_MB")
+        crc = self._crc(a)
+        with self.lock:
+            old = self.items.pop(handle, None)
+            if old is not None:
+                self.bytes -= old[0].nbytes
+            self.items[handle] = (a, crc, time.time())
+            self.bytes += a.nbytes
+            while self.bytes > self.cap and len(self.items) > 1:
+                _, (b, _, _) = self.items.popitem(last=False)
+                self.bytes -= b.nbytes
+                self.evicted += 1
+
+    def get(self, handles: list) -> list[np.ndarray]:
+        out, missing = [], []
+        with self.lock:
+            for h in handles:
+                it = self.items.get(h) if isinstance(h, str) else None
+                if it is None:
+                    missing.append(h)
+                    continue
+                self.items.move_to_end(h)
+                self.items[h] = (it[0], it[1], time.time())
+                out.append(it)
+        bad = [h for h, it in zip([h for h in handles if h not in missing], out) if self._crc(it[0]) != it[1]]
+        if bad:
+            log.error(f"tensor store: CRC mismatch on {bad} (memory fault?); dropped")
+            with self.lock:
+                for h in bad:
+                    it = self.items.pop(h, None)
+                    if it is not None:
+                        self.bytes -= it[0].nbytes
+                self.corrupt += len(bad)
+            missing += bad
+        if missing:
+            self.misses += len(missing)
+            raise ApiError(409, "ref_missing", f"{len(missing)} kept tensor(s) no longer on the server "
+                                               f"(evicted, expired or restarted): {missing[:4]}",
+                           {"missing": missing})
+        self.hits += len(out)
+        return [it[0] for it in out]
+
+    def forget(self, prefix: str | None = None, handles: list | None = None) -> int:
+        with self.lock:
+            ks = [k for k in self.items if (prefix is not None and k.startswith(prefix)) or
+                  (handles is not None and k in handles)]
+            for k in ks:
+                self.bytes -= self.items.pop(k)[0].nbytes
+        return len(ks)
+
+    def reap(self):
+        now = time.time()
+        with self.lock:
+            ks = [k for k, it in self.items.items() if now - it[2] > STORE_IDLE_S]
+            for k in ks:
+                self.bytes -= self.items.pop(k)[0].nbytes
+        if ks:
+            log.info(f"tensor store: {len(ks)} idle tensor(s) dropped")
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {"tensors": len(self.items), "mb": round(self.bytes / (1 << 20), 1), "cap_mb": STORE_MB,
+                    "idle_drop_s": STORE_IDLE_S, "hits": self.hits, "misses": self.misses,
+                    "evicted": self.evicted, "crc_failures": self.corrupt}
+
+
+STORE = TensorStore()
+
+
+def _decode_input(d: dict, area: memoryview) -> np.ndarray:
+    """A CWT1 tensor, or kept tensors ("refs": [handles], concatenated along "axis", default 0)."""
+    refs = d.get("refs")
+    if refs is None:
+        return ct.decode_tensor(d, area)
+    if not isinstance(refs, list) or not refs:
+        raise ApiError(400, "bad_tensor", f"input {d.get('name')}: refs must be a non-empty list of handles")
+    arrs = STORE.get(refs)
+    if len(arrs) == 1:
+        return arrs[0]
+    try:
+        return np.concatenate(arrs, axis=int(d.get("axis", 0)))
+    except ValueError as exc:
+        raise ApiError(400, "bad_tensor", f"input {d.get('name')}: cannot concatenate refs: {exc}") from exc
 
 
 def _is_oom(msg: str) -> bool:
@@ -495,13 +632,16 @@ def infer(header: dict, area: memoryview) -> tuple[dict, bytes]:
     try:
         feeds = {}
         for d in header.get("inputs") or []:
-            feeds[d["name"]] = ct.decode_tensor(d, area)
+            feeds[d["name"]] = _decode_input(d, area)
     except ct.CodecError as exc:
         raise ApiError(400, "bad_tensor", str(exc)) from exc
     except (KeyError, TypeError) as exc:
         raise ApiError(400, "bad_tensor", f"malformed tensor descriptor: {exc}") from exc
     t_dec = time.perf_counter()
     want_out = header.get("outputs")
+    keep = header.get("keep") or {}
+    if not isinstance(keep, dict):
+        raise ApiError(400, "bad_request", "keep must be an object {output name: handle}")
     out_dtype = header.get("output_dtype")
     if out_dtype not in (None, "float32", "float16"):
         raise ApiError(400, "bad_request", "output_dtype must be float32 (default) or float16 (lossy)")
@@ -536,16 +676,17 @@ def infer(header: dict, area: memoryview) -> tuple[dict, bytes]:
                 raise ApiError(400, "bad_inputs", f"input {k}: dtype {a.dtype}, model wants {dt}")
             if len(shape) != a.ndim or any(isinstance(s, int) and s != n for s, n in zip(shape, a.shape)):
                 raise ApiError(400, "bad_inputs", f"input {k}: shape {list(a.shape)}, model wants {shape}")
-        names = want_out or e.out_names
-        bad = [n for n in names if n not in e.out_names]
+        names = list(e.out_names if want_out is None else want_out)
+        run_names = names + [k for k in keep if k not in names]
+        bad = [n for n in run_names if n not in e.out_names]
         if bad:
             raise ApiError(400, "bad_request", f"unknown outputs {bad}; model has {e.out_names}")
         ro = ort.RunOptions()
-        if SHRINK:
+        if SHRINK and ep.get("device") != "cpu":
             ro.add_run_config_entry("memory.enable_memory_arena_shrinkage", "gpu:0")
         tr = time.perf_counter()
         try:
-            outs = e.sess.run(names, feeds, ro)
+            outs = e.sess.run(run_names, feeds, ro)
         except Exception as exc:  # noqa: BLE001 — classified below
             msg = str(exc)
             SESSIONS.release((m.name, m.sha, ep_key(ep)))
@@ -558,7 +699,7 @@ def infer(header: dict, area: memoryview) -> tuple[dict, bytes]:
         e.runs += 1
         e.last = time.time()
         SESSIONS.n_runs += 1
-        for n, a in zip(names, outs):
+        for n, a in zip(run_names, outs):
             if a.dtype.kind == "f" and not np.isfinite(a).all():
                 # suspicious: drop the session so the next load re-hashes + re-canaries
                 SESSIONS.release((m.name, m.sha, ep_key(ep)))
@@ -569,6 +710,10 @@ def infer(header: dict, area: memoryview) -> tuple[dict, bytes]:
         SESSIONS.running = None
         SESSIONS.gpu.release()
     t_run = time.perf_counter()
+    by_name = dict(zip(run_names, outs))
+    for n, h in keep.items():
+        STORE.put(h, by_name[n])
+    outs = [by_name[n] for n in names]
     try:
         lvl = int(header.get("output_level", OUT_LEVEL))
     except (TypeError, ValueError):
@@ -591,9 +736,31 @@ def infer(header: dict, area: memoryview) -> tuple[dict, bytes]:
                        "load": round(load_ms, 1), "run": round(run_ms, 1),
                        "encode": round((t_enc - t_run) * 1e3, 1), "total": round((t_enc - t0) * 1e3, 1)},
     }
+    if keep:
+        res["kept"] = sorted(keep.values())
     log.info(f"infer {name} {[list(a.shape) for a in feeds.values()]} -> {[d['shape'] for d in descs]} "
-             f"t={res['timings_ms']}")
+             f"{f'kept {len(keep)} ' if keep else ''}t={res['timings_ms']}")
     return res, b.pack(res)
+
+
+def fetch(header: dict) -> bytes:
+    """Kept tensors back to the client, optionally only some indices along an axis
+    (cwSegment: the detector's masks of the queries above its threshold)."""
+    reqs = header.get("tensors")
+    if not isinstance(reqs, list) or not reqs:
+        raise ApiError(400, "bad_request", "tensors: [{ref, axis?, index?}] required")
+    arrs = STORE.get([r.get("ref") for r in reqs])
+    b = ct.Builder(level=OUT_LEVEL)
+    descs = []
+    for r, a in zip(reqs, arrs):
+        if r.get("index") is not None:
+            try:
+                a = np.take(a, np.asarray(r["index"], np.int64), axis=int(r.get("axis", 0)))
+            except (IndexError, ValueError, TypeError) as exc:
+                raise ApiError(400, "bad_request", f"fetch {r.get('ref')}: {exc}") from exc
+        descs.append(b.tensor(str(r.get("name") or r["ref"]), np.ascontiguousarray(a),
+                              "xor-shuf-zstd" if a.dtype.kind == "f" else "zstd"))
+    return b.pack({"ok": True, "api": API_VERSION, "outputs": descs})
 
 
 # ──────────────────────────────────────────────────────────────── health ──
@@ -633,6 +800,7 @@ def health() -> dict:
         "settings": {"idle_release_s": IDLE_S, "max_sessions": MAX_SESSIONS, "arena_shrink": SHRINK,
                      "gpu_mem_limit_gb": GPU_MEM_LIMIT / (1 << 30)},
         "models": len(REGISTRY.models), "startup_canary": STARTUP,
+        "features": ["refs", "keep", "fetch", "device"], "store": STORE.snapshot(),
     }
 
 
@@ -664,7 +832,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _err(self, e: ApiError):
         extra = {"Retry-After": "2"} if e.status == 503 else None
-        body = json.dumps({"ok": False, "code": e.code, "error": e.msg}).encode()
+        body = json.dumps({"ok": False, "code": e.code, "error": e.msg, **e.extra}).encode()
         self._send(e.status, body, "application/json", extra)
 
     def do_GET(self):
@@ -703,6 +871,18 @@ class Handler(BaseHTTPRequestHandler):
                 with SESSIONS.gpu:
                     k = SESSIONS.release()
                 return self._json(200, {"ok": True, "released": k})
+            if route == "/fetch":
+                header, _ = ct.unpack(body)
+                return self._send(200, fetch(header), ct.CONTENT_TYPE)
+            if route == "/forget":
+                try:
+                    j = json.loads(body or b"{}")
+                except ValueError:
+                    raise ApiError(400, "bad_request", "body must be JSON {prefix} or {handles}") from None
+                prefix, handles = j.get("prefix"), j.get("handles")
+                if (prefix is None) == (handles is None) or (prefix is not None and not prefix):
+                    raise ApiError(400, "bad_request", "give exactly one of prefix (non-empty) or handles")
+                return self._json(200, {"ok": True, "forgotten": STORE.forget(prefix, handles)})
             if route == "/rescan":
                 REGISTRY.scan(force=True)
                 return self._json(200, {"ok": True, "models": len(REGISTRY.models)})
@@ -722,6 +902,7 @@ def _reaper():
         time.sleep(min(30.0, max(1.0, IDLE_S / 4)))
         try:
             SESSIONS.reap()
+            STORE.reap()
         except Exception:  # noqa: BLE001 — logged, the loop keeps running
             log.exception("reaper")
 

@@ -56,7 +56,6 @@ pub fn clear_caches() {
         g.clear();
     }
     crate::multi::clear_cache();
-    crate::remote::forget_sent();
     crate::local::clear_cache();
 }
 
@@ -176,8 +175,8 @@ pub fn render(eh: OfxImageEffectHandle, in_args: OfxPropertySetHandle) -> OfxSta
     }
 
     let (fw, fh) = (src.w(), src.h());
-    let max_edge = if v.mode == 1 { LOCAL_SIZE } else { v.send_size as usize };
-    let (mw, mh) = imgutil::fit_size(fw, fh, max_edge);
+    // Local and Remote run the same graphs on the same 1008 px image
+    let (mw, mh) = imgutil::fit_size(fw, fh, LOCAL_SIZE);
     let geo = Geo { fw, fh, b: src.bounds, rs, mw, mh };
 
     let prompts = build_prompts(eh, &src, &v, &geo, time);
@@ -214,19 +213,8 @@ pub fn render(eh: OfxImageEffectHandle, in_args: OfxPropertySetHandle) -> OfxSta
                     return kOfxStatOK;
                 }
                 let t0 = std::time::Instant::now();
-                let r = if v.mode == 1 {
-                    // text only -> detector; points / box -> tracker (text ignored)
-                    crate::local::segment(&fk, &img8, &prompts, &v)
-                } else {
-                    let o = crate::remote::RemoteOpts {
-                        server: v.server.clone(),
-                        timeout_s: v.timeout,
-                        best_only: v.best_only,
-                        score_threshold: v.score_threshold,
-                        jpeg_quality: 88,
-                    };
-                    crate::remote::segment(&fk, &img8, &prompts, &o).map(|r| r.mask)
-                };
+                // text only -> detector; points / box -> tracker (text ignored); Local or Remote
+                let r = crate::local::segment(&fk, &img8, &prompts, &v);
                 match r {
                     Ok(m) => {
                         let m = if m.w != mw || m.h != mh { imgutil::bilinear_gray(&m, mw, mh) } else { m };

@@ -1,4 +1,7 @@
-//! Local backend: SAM3 tracker-path encoder/decoder ONNX via onnxruntime
+//! SAM3 for cwSegment: encoder/decoder (+ text detector, tracker) ONNX, run
+//! in this process (Local, onnxruntime) or on cwtools-infer (Remote, the same
+//! files, crate::sam_remote). Everything around the graphs is shared, so the
+//! two modes only differ in where a graph runs ([`Engine`]).
 //!
 //! - encoder.onnx: image [1,3,1008,1008] RGB 0..1 (display-referred) →
 //!   image_embed [1,256,72,72], high_res_0 [1,32,288,288], high_res_1 [1,64,144,144]
@@ -44,6 +47,48 @@ pub(crate) struct Embeds {
     pub(crate) hr1: Vec<f32>,
     /// Detector neck levels 0..2 (encoder v2 only).
     det: Option<[Vec<f32>; 3]>,
+    /// Remote: the outputs stay on the server (empty vectors here).
+    remote: Option<RemoteFeat>,
+}
+
+pub(crate) struct RemoteFeat {
+    server: String,
+    /// handle prefix of the kept encoder outputs
+    prefix: String,
+    /// the detector neck levels were kept too
+    det: bool,
+}
+
+impl Drop for RemoteFeat {
+    /// Embedding no longer cached (evicted / released): drop it on the server too.
+    fn drop(&mut self) {
+        let (server, prefix) = (std::mem::take(&mut self.server), std::mem::take(&mut self.prefix));
+        std::thread::spawn(move || {
+            if let Err(e) = cwtools_remote::forget(&server, Some(&prefix), &[], 5.0) {
+                crate::log::log(&format!("remote: could not release {prefix} on the server: {e}"));
+            }
+        });
+    }
+}
+
+/// Where the SAM3 graphs run.
+enum Engine<'a> {
+    Local(&'a Model),
+    Remote(&'a RemoteSam),
+}
+impl Engine<'_> {
+    fn dir(&self) -> &std::path::Path {
+        match self {
+            Engine::Local(m) => &m.dir,
+            Engine::Remote(r) => &r.dir,
+        }
+    }
+    fn tag(&self) -> String {
+        match self {
+            Engine::Local(_) => "local".into(),
+            Engine::Remote(r) => format!("remote {}", r.server),
+        }
+    }
 }
 
 /// The encoder/decoder pair currently in use. Both sessions live in the
@@ -68,6 +113,7 @@ pub fn clear_cache() {
     }
 }
 
+use crate::sam_remote::{RemoteSam, FEATS_GONE};
 use cwtools_core::ort_rt::{self, ConvSearch, Ep, ModelKey, Precision, SharedSession};
 
 /// Session key for one SAM file. The CUDA options equal onnxruntime's
@@ -80,6 +126,42 @@ fn key_for(path: &std::path::Path, gpu: bool) -> ModelKey {
         precision: Precision::Tf32,
         conv_max_workspace: true,
         conv_search: ConvSearch::Exhaustive,
+    }
+}
+
+/// The Model Folder, or the installed models when the node's folder does not
+/// exist here (e.g. a setup saved on another workstation).
+pub(crate) fn model_folder(v: &Values) -> std::path::PathBuf {
+    let installed = &cwtools_core::config::get().segment_models;
+    if !std::path::Path::new(&v.model_dir).is_dir() && std::path::Path::new(installed).is_dir() {
+        crate::log::log(&format!("local: {} missing, using the installed models in {installed} (cwtools.conf)", v.model_dir));
+        std::path::PathBuf::from(installed)
+    } else {
+        std::path::PathBuf::from(&v.model_dir)
+    }
+}
+
+/// Run `f` on the node's engine: Mode Remote = cwtools-infer, Local = this process.
+/// Remote encoder features the server dropped (restart, eviction) are recomputed once.
+fn with_engine<R>(v: &Values, f: impl Fn(&Engine) -> Result<R, String>) -> Result<R, String> {
+    if v.mode == 0 {
+        let rs = RemoteSam { server: v.server.clone(), timeout_s: v.timeout, dir: model_folder(v) };
+        match f(&Engine::Remote(&rs)) {
+            Err(e) if e.starts_with(FEATS_GONE) => {
+                crate::log::log(&format!("remote: {e}; encoding again"));
+                forget_remote_embeds();
+                f(&Engine::Remote(&rs))
+            }
+            r => r,
+        }
+    } else {
+        with_model(v, |m| f(&Engine::Local(m)))
+    }
+}
+
+fn forget_remote_embeds() {
+    if let Ok(mut g) = EMB_CACHE.lock() {
+        g.retain(|(_, e)| e.remote.is_none());
     }
 }
 
@@ -98,15 +180,8 @@ fn with_model<R>(v: &Values, f: impl FnOnce(&Model) -> Result<R, String>) -> Res
             *pk = pair;
         }
     }
-    // Fallback: a Model Folder set in the node (e.g. a setup saved on another
-    // workstation) that does not exist here -> the installed models folder.
-    let installed = &cwtools_core::config::get().segment_models;
-    let dir = if !std::path::Path::new(&v.model_dir).is_dir() && std::path::Path::new(installed).is_dir() {
-        crate::log::log(&format!("local: {} missing, using the installed models in {installed} (cwtools.conf)", v.model_dir));
-        std::path::Path::new(installed)
-    } else {
-        std::path::Path::new(&v.model_dir)
-    };
+    let dir_buf = model_folder(v);
+    let dir = dir_buf.as_path();
     let fp16 = dir.join("encoder_fp16.onnx");
     // fp16 encoder only where CUDA can run it: macOS has no CUDA (onnxruntime falls back to the
     // CPU, where the fp32 encoder of segment-sam3-cpu is the right one)
@@ -209,15 +284,34 @@ fn image_tensor(img: &Rgb8) -> Vec<f32> {
     t
 }
 
-/// Encoder output for this frame (cached per frame key + model folder).
-fn embeds(fk: &str, img: &Rgb8, v: &Values, m: &Model) -> Result<Arc<Embeds>, String> {
+/// Encoder output for this frame (cached per frame key + model folder + engine).
+/// `det` = the text detector will need the neck levels (Remote keeps them only then).
+fn embeds(fk: &str, img: &Rgb8, v: &Values, eng: &Engine, det: bool) -> Result<Arc<Embeds>, String> {
     if img.w > S || img.h > S {
         return Err(format!("internal: local image {}x{} exceeds {S}", img.w, img.h));
     }
-    let ckey = format!("{fk}|{}", v.model_dir);
+    let ckey = format!("{fk}|{}|{}", v.model_dir, eng.tag());
     if let Some(e) = if v.cache { emb_get(&ckey) } else { None } {
-        return Ok(e);
+        if !det || e.remote.as_ref().map(|r| r.det).unwrap_or(true) {
+            return Ok(e);
+        }
     }
+    let m = match eng {
+        Engine::Local(m) => m,
+        Engine::Remote(rs) => {
+            let t0 = std::time::Instant::now();
+            let prefix = rs.encode(img, &image_tensor(img), det)?;
+            if crate::log::verbose() {
+                crate::log::log(&format!("remote: encoder {:.0} ms (text={det})", t0.elapsed().as_secs_f64() * 1000.0));
+            }
+            let e = Arc::new(Embeds {
+                embed: Vec::new(), hr0: Vec::new(), hr1: Vec::new(), det: None,
+                remote: Some(RemoteFeat { server: rs.server.clone(), prefix, det }),
+            });
+            emb_put(ckey, e.clone());
+            return Ok(e);
+        }
+    };
     let t0 = std::time::Instant::now();
     let x = Tensor::from_array((vec![1i64, 3, S as i64, S as i64], image_tensor(img))).map_err(|e| format!("tensor: {e}"))?;
     let ro = run_opts(v, &m.encoder)?;
@@ -229,7 +323,7 @@ fn embeds(fk: &str, img: &Rgb8, v: &Values, m: &Model) -> Result<Arc<Embeds>, St
     } else {
         None
     };
-    let e = Arc::new(Embeds { embed: extract(&out, "image_embed")?, hr0: extract(&out, "high_res_0")?, hr1: extract(&out, "high_res_1")?, det });
+    let e = Arc::new(Embeds { embed: extract(&out, "image_embed")?, hr0: extract(&out, "high_res_0")?, hr1: extract(&out, "high_res_1")?, det, remote: None });
     if crate::log::verbose() {
         crate::log::log(&format!("local: encoder {:.0} ms (gpu={}, text={has_det})", t0.elapsed().as_secs_f64() * 1000.0, m.gpu));
     }
@@ -247,8 +341,8 @@ pub fn segment(fk: &str, img: &Rgb8, p: &Prompts, v: &Values) -> Result<Gray, St
         }
         return segment_text(fk, img, p.text.trim(), v);
     }
-    with_model(v, |m| {
-        let emb = embeds(fk, img, v, m)?;
+    with_engine(v, |eng| {
+        let emb = embeds(fk, img, v, eng, false)?;
 
         let mut coords: Vec<f32> = Vec::new();
         let mut labels: Vec<f32> = Vec::new();
@@ -260,24 +354,29 @@ pub fn segment(fk: &str, img: &Rgb8, p: &Prompts, v: &Values) -> Result<Gray, St
             coords.extend_from_slice(&[b[0], b[1], b[2], b[3]]);
             labels.extend_from_slice(&[2.0, 3.0]);
         }
-        let n = labels.len() as i64;
-        let t = |shape: Vec<i64>, d: Vec<f32>| Tensor::from_array((shape, d)).map_err(|e| format!("tensor: {e}"));
-        let ro = run_opts(v, &m.decoder)?;
-        let mut ds = m.decoder.session.lock().map_err(|_| "session lock poisoned".to_string())?;
-        let out = ds
-            .run_with_options(ort::inputs![
-                "image_embed" => t(vec![1, 256, 72, 72], emb.embed.clone())?,
-                "high_res_0" => t(vec![1, 32, 288, 288], emb.hr0.clone())?,
-                "high_res_1" => t(vec![1, 64, 144, 144], emb.hr1.clone())?,
-                "point_coords" => t(vec![1, n, 2], coords)?,
-                "point_labels" => t(vec![1, n], labels)?,
-                "mask_input" => t(vec![1, 1, LR as i64, LR as i64], vec![0f32; LR * LR])?,
-                "has_mask_input" => t(vec![1], vec![0f32])?,
-            ], &ro)
-            .map_err(|e| format!("decoder run: {e}"))?;
-        let masks = extract(&out, "low_res_masks")?;
-        let iou = extract(&out, "iou_predictions")?;
-        let obj = extract(&out, "object_score").ok().and_then(|v| v.first().copied()).unwrap_or(1.0);
+        let (masks, iou, obj) = match (eng, &emb.remote) {
+            (Engine::Remote(rs), Some(r)) => rs.decode(&r.prefix, coords, labels)?,
+            (Engine::Local(m), None) => {
+                let n = labels.len() as i64;
+                let t = |shape: Vec<i64>, d: Vec<f32>| Tensor::from_array((shape, d)).map_err(|e| format!("tensor: {e}"));
+                let ro = run_opts(v, &m.decoder)?;
+                let mut ds = m.decoder.session.lock().map_err(|_| "session lock poisoned".to_string())?;
+                let out = ds
+                    .run_with_options(ort::inputs![
+                        "image_embed" => t(vec![1, 256, 72, 72], emb.embed.clone())?,
+                        "high_res_0" => t(vec![1, 32, 288, 288], emb.hr0.clone())?,
+                        "high_res_1" => t(vec![1, 64, 144, 144], emb.hr1.clone())?,
+                        "point_coords" => t(vec![1, n, 2], coords)?,
+                        "point_labels" => t(vec![1, n], labels)?,
+                        "mask_input" => t(vec![1, 1, LR as i64, LR as i64], vec![0f32; LR * LR])?,
+                        "has_mask_input" => t(vec![1], vec![0f32])?,
+                    ], &ro)
+                    .map_err(|e| format!("decoder run: {e}"))?;
+                let obj = extract(&out, "object_score").ok().and_then(|v| v.first().copied()).unwrap_or(1.0);
+                (extract(&out, "low_res_masks")?, extract(&out, "iou_predictions")?, obj)
+            }
+            _ => return Err("internal: embedding of the other mode".into()),
+        };
         if masks.len() < 4 * LR * LR || iou.len() < 4 {
             return Err(format!("unexpected decoder output sizes {} / {}", masks.len(), iou.len()));
         }
@@ -288,7 +387,7 @@ pub fn segment(fk: &str, img: &Rgb8, p: &Prompts, v: &Values) -> Result<Gray, St
             0
         };
         if crate::log::verbose() {
-            crate::log::log(&format!("local: decoder idx={idx} iou={iou:?} object_score={obj:.2}"));
+            crate::log::log(&format!("{}: decoder idx={idx} iou={iou:?} object_score={obj:.2}", eng.tag()));
         }
         if obj < 0.0 {
             return Ok(Gray { w: img.w, h: img.h, data: vec![0.0; img.w * img.h] });
@@ -312,6 +411,12 @@ pub(crate) struct TrackFeat {
     dir: std::path::PathBuf,
 }
 
+impl TrackBackend<'_> {
+    fn remote(&self, dir: &std::path::Path) -> RemoteSam {
+        RemoteSam { server: self.v.server.clone(), timeout_s: self.v.timeout, dir: dir.to_path_buf() }
+    }
+}
+
 fn feat_inputs(t: &dyn Fn(Vec<i64>, Vec<f32>) -> Result<Tensor<f32>, String>, e: &Embeds) -> Result<[Tensor<f32>; 3], String> {
     Ok([
         t(vec![1, 256, 72, 72], e.embed.clone())?,
@@ -325,7 +430,7 @@ fn track_out(out: &ort::session::SessionOutputs) -> Result<crate::track::Out, St
         low: extract(out, "low_res_mask")?,
         obj: extract(out, "object_score")?.first().copied().unwrap_or(f32::NAN),
         ptr: extract(out, "object_pointer")?,
-        mem: extract(out, "maskmem")?,
+        mem: crate::track::Mem::Local(Arc::new(extract(out, "maskmem")?)),
     })
 }
 
@@ -365,7 +470,7 @@ pub(crate) fn run_track_step(v: &Values, dir: &std::path::Path, emb: &Embeds, in
     let out = ss
         .run_with_options(ort::inputs![
             "image_embed" => e, "high_res_0" => h0, "high_res_1" => h1,
-            "mem_feats" => t(vec![n, 64, 72, 72], inp.feats.clone())?,
+            "mem_feats" => t(vec![n, 64, 72, 72], inp.feats_local()?)?,
             "mem_tpos" => Tensor::from_array((vec![n], inp.tpos.clone())).map_err(|e| format!("tensor: {e}"))?,
             "pointers" => t(vec![p, 256], inp.ptrs.clone())?,
             "pointer_offsets" => t(vec![p], inp.offs.clone())?,
@@ -384,13 +489,24 @@ impl crate::track::Backend for TrackBackend<'_> {
         if self.img.w > S || self.img.h > S {
             return Err(format!("internal: local image {}x{} exceeds {S}", self.img.w, self.img.h));
         }
-        with_model(self.v, |m| Ok(TrackFeat { emb: embeds(self.fk, self.img, self.v, m)?, dir: m.dir.clone() }))
+        with_engine(self.v, |eng| Ok(TrackFeat { emb: embeds(self.fk, self.img, self.v, eng, false)?, dir: eng.dir().to_path_buf() }))
     }
-    fn init(&mut self, f: &TrackFeat, mask: Vec<f32>) -> Result<crate::track::Out, String> {
-        run_track_init(self.v, &f.dir, &f.emb, mask)
+    fn init(&mut self, f: &TrackFeat, mask: Vec<f32>, tag: &str) -> Result<crate::track::Out, String> {
+        match &f.emb.remote {
+            Some(r) => self.remote(&f.dir).track_init(&r.prefix, mask, tag),
+            None => run_track_init(self.v, &f.dir, &f.emb, mask),
+        }
     }
-    fn step(&mut self, f: &TrackFeat, inp: &crate::track::StepInputs) -> Result<crate::track::Out, String> {
-        run_track_step(self.v, &f.dir, &f.emb, inp)
+    fn step(&mut self, f: &TrackFeat, inp: &crate::track::StepInputs, tag: &str) -> Result<crate::track::Out, String> {
+        match &f.emb.remote {
+            Some(r) => self.remote(&f.dir).track_step(&r.prefix, inp, tag),
+            None => run_track_step(self.v, &f.dir, &f.emb, inp),
+        }
+    }
+    fn release(&mut self, handles: Vec<String>) {
+        if self.v.mode == 0 {
+            self.remote(std::path::Path::new(&self.v.model_dir)).release(&handles);
+        }
     }
 }
 
@@ -409,8 +525,21 @@ struct Detections {
     scores: Vec<f32>,
     /// xyxy, 0..1 of the 1008² frame
     boxes: Vec<f32>,
-    /// NQ x 288 x 288 logits
+    /// NQ x 288 x 288 logits (Local), or those of `sel` only (Remote)
     masks: Vec<f32>,
+    /// Remote: the queries whose masks were downloaded (above Detect Thresh)
+    sel: Option<Vec<usize>>,
+}
+
+impl Detections {
+    /// 288² logits of query `i` (Remote: only a query above the threshold).
+    fn mask(&self, i: usize) -> &[f32] {
+        let k = match &self.sel {
+            None => i,
+            Some(s) => s.iter().position(|&q| q == i).expect("mask of a query below the threshold"),
+        };
+        &self.masks[k * LR * LR..(k + 1) * LR * LR]
+    }
 }
 
 fn sigmoid(x: f32) -> f32 {
@@ -438,29 +567,36 @@ fn need(dir: &std::path::Path, f: &str) -> Result<std::path::PathBuf, String> {
     }
 }
 
-/// Text features for `text` (text encoder on the CPU; cached).
-fn text_features(v: &Values, dir: &std::path::Path, text: &str) -> Result<Arc<(Vec<f32>, Vec<i64>)>, String> {
-    let key = format!("{}|{text}", dir.display());
+/// Text features for `text` (text encoder on the CPU, here or on the server; cached).
+fn text_features(v: &Values, eng: &Engine, text: &str) -> Result<Arc<(Vec<f32>, Vec<i64>)>, String> {
+    let dir = eng.dir();
+    let key = format!("{}|{}|{text}", dir.display(), eng.tag());
     if let Ok(g) = TEXT_CACHE.lock() {
         if let Some((_, f)) = g.iter().find(|(k, _)| *k == key) {
             return Ok(f.clone());
         }
     }
     let tok = tokenizer(dir)?;
-    let te = ort_rt::shared_session(&v.ort_lib, &key_for(&need(dir, "text_encoder.onnx")?, false))?;
     let (ids, mask) = tok.encode(text);
-    let n = crate::clip_tok::TEXT_LEN as i64;
     let t0 = std::time::Instant::now();
-    let mut s = te.session.lock().map_err(|_| "session lock poisoned".to_string())?;
-    let out = s
-        .run(ort::inputs![
-            "input_ids" => Tensor::from_array((vec![1, n], ids)).map_err(|e| format!("tensor: {e}"))?,
-            "attention_mask" => Tensor::from_array((vec![1, n], mask.clone())).map_err(|e| format!("tensor: {e}"))?,
-        ])
-        .map_err(|e| format!("text encoder run: {e}"))?;
-    let f = Arc::new((extract(&out, "text_features")?, mask));
+    let feats = match eng {
+        Engine::Remote(rs) => rs.text_features(ids, mask.clone())?,
+        Engine::Local(_) => {
+            let te = ort_rt::shared_session(&v.ort_lib, &key_for(&need(dir, "text_encoder.onnx")?, false))?;
+            let n = crate::clip_tok::TEXT_LEN as i64;
+            let mut s = te.session.lock().map_err(|_| "session lock poisoned".to_string())?;
+            let out = s
+                .run(ort::inputs![
+                    "input_ids" => Tensor::from_array((vec![1, n], ids)).map_err(|e| format!("tensor: {e}"))?,
+                    "attention_mask" => Tensor::from_array((vec![1, n], mask.clone())).map_err(|e| format!("tensor: {e}"))?,
+                ])
+                .map_err(|e| format!("text encoder run: {e}"))?;
+            extract(&out, "text_features")?
+        }
+    };
+    let f = Arc::new((feats, mask));
     if crate::log::verbose() {
-        crate::log::log(&format!("local: text encoder '{text}' {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0));
+        crate::log::log(&format!("{}: text encoder '{text}' {:.0} ms", eng.tag(), t0.elapsed().as_secs_f64() * 1000.0));
     }
     if let Ok(mut g) = TEXT_CACHE.lock() {
         if g.len() >= TEXT_CAP {
@@ -471,11 +607,38 @@ fn text_features(v: &Values, dir: &std::path::Path, text: &str) -> Result<Arc<(V
     Ok(f)
 }
 
-fn detect(v: &Values, m: &Model, emb: &Embeds, text: &str) -> Result<Detections, String> {
+/// Detections of `text`; Remote downloads the masks of the queries above `thr` only.
+fn detect(v: &Values, eng: &Engine, emb: &Embeds, text: &str, thr: f32) -> Result<Detections, String> {
+    let tf = text_features(v, eng, text)?;
+    let m = match (eng, &emb.remote) {
+        (Engine::Local(m), None) => m,
+        (Engine::Remote(rs), Some(r)) => {
+            let t0 = std::time::Instant::now();
+            let (logits, presence, boxes, h) = rs.detect(&r.prefix, &tf.0, &tf.1)?;
+            if logits.len() != NQ || boxes.len() != NQ * 4 {
+                rs.release(&[h]);
+                return Err(format!("unexpected detector output sizes {} / {}", logits.len(), boxes.len()));
+            }
+            let p = sigmoid(presence);
+            let scores: Vec<f32> = logits.iter().map(|l| sigmoid(*l) * p).collect();
+            if scores.iter().any(|x| !x.is_finite()) {
+                rs.release(&[h]);
+                return Err("detector produced non-finite scores".into());
+            }
+            let sel = kept(&scores, thr);
+            let masks = rs.masks(&h, &sel)?;
+            if crate::log::verbose() {
+                let best = scores.iter().cloned().fold(0f32, f32::max);
+                crate::log::log(&format!("{}: detector '{text}' {:.0} ms presence={p:.3} best={best:.3} kept={}",
+                                         eng.tag(), t0.elapsed().as_secs_f64() * 1000.0, sel.len()));
+            }
+            return Ok(Detections { scores, boxes, masks, sel: Some(sel) });
+        }
+        _ => return Err("internal: embedding of the other mode".into()),
+    };
     let det = emb.det.as_ref().ok_or_else(|| {
         format!("the encoder in {} has no text support (click-only v1 encoder); install the SAM3 text models", m.dir.display())
     })?;
-    let tf = text_features(v, &m.dir, text)?;
     let ds = ort_rt::shared_session(&v.ort_lib, &key_for(&need(&m.dir, "detector.onnx")?, v.use_gpu))?;
     let t = |shape: Vec<i64>, d: Vec<f32>| Tensor::from_array((shape, d)).map_err(|e| format!("tensor: {e}"));
     let n = crate::clip_tok::TEXT_LEN as i64;
@@ -507,7 +670,7 @@ fn detect(v: &Values, m: &Model, emb: &Embeds, text: &str) -> Result<Detections,
         let best = scores.iter().cloned().fold(0f32, f32::max);
         crate::log::log(&format!("local: detector '{text}' {:.0} ms presence={p:.3} best={best:.3}", t0.elapsed().as_secs_f64() * 1000.0));
     }
-    Ok(Detections { scores, boxes, masks })
+    Ok(Detections { scores, boxes, masks, sel: None })
 }
 
 /// Query indices above `thr`, best first.
@@ -518,9 +681,9 @@ fn kept(scores: &[f32], thr: f32) -> Vec<usize> {
 }
 
 fn segment_text(fk: &str, img: &Rgb8, text: &str, v: &Values) -> Result<Gray, String> {
-    with_model(v, |m| {
-        let emb = embeds(fk, img, v, m)?;
-        let d = detect(v, m, &emb, text)?;
+    with_engine(v, |eng| {
+        let emb = embeds(fk, img, v, eng, true)?;
+        let d = detect(v, eng, &emb, text, v.score_threshold as f32)?;
         let mut k = kept(&d.scores, v.score_threshold as f32);
         if v.best_only {
             k.truncate(1);
@@ -529,9 +692,9 @@ fn segment_text(fk: &str, img: &Rgb8, text: &str, v: &Values) -> Result<Gray, St
             return Ok(Gray { w: img.w, h: img.h, data: vec![0.0; img.w * img.h] });
         }
         // union = max of the probabilities = sigmoid of the max logit
-        let mut lr = d.masks[k[0] * LR * LR..(k[0] + 1) * LR * LR].to_vec();
+        let mut lr = d.mask(k[0]).to_vec();
         for &i in &k[1..] {
-            for (a, b) in lr.iter_mut().zip(&d.masks[i * LR * LR..(i + 1) * LR * LR]) {
+            for (a, b) in lr.iter_mut().zip(d.mask(i)) {
                 *a = a.max(*b);
             }
         }
@@ -543,16 +706,16 @@ fn segment_text(fk: &str, img: &Rgb8, text: &str, v: &Values) -> Result<Gray, St
 /// size (what the Remote server's `instances: "all"` returns): above Detect
 /// Thresh, at most `max_instances` (highest scores), concept order then score.
 pub fn segment_instances(fk: &str, img: &Rgb8, concepts: &[String], v: &Values, max_instances: i32) -> Result<Vec<Instance>, String> {
-    with_model(v, |m| {
-        let emb = embeds(fk, img, v, m)?;
+    with_engine(v, |eng| {
+        let emb = embeds(fk, img, v, eng, true)?;
         let mut items: Vec<(usize, f32, [f32; 4], Vec<f32>)> = Vec::new();
         for (ci, c) in concepts.iter().enumerate() {
-            let d = detect(v, m, &emb, c)?;
+            let d = detect(v, eng, &emb, c, v.score_threshold as f32)?;
             for i in kept(&d.scores, v.score_threshold as f32) {
                 let b = &d.boxes[i * 4..i * 4 + 4];
                 let px = |x: f32, lim: usize| (x * S as f32).clamp(0.0, lim as f32);
                 items.push((ci, d.scores[i], [px(b[0], img.w), px(b[1], img.h), px(b[2], img.w), px(b[3], img.h)],
-                            d.masks[i * LR * LR..(i + 1) * LR * LR].to_vec()));
+                            d.mask(i).to_vec()));
             }
         }
         let cap = max_instances.clamp(1, 128) as usize;
@@ -662,8 +825,8 @@ mod tests {
         impl Backend for Dump<'_> {
             type Feat = Arc<Embeds>;
             fn features(&mut self) -> Result<Arc<Embeds>, String> { Ok(self.cur.clone().unwrap()) }
-            fn init(&mut self, f: &Arc<Embeds>, m: Vec<f32>) -> Result<track::Out, String> { run_track_init(self.v, &self.dir, f, m) }
-            fn step(&mut self, f: &Arc<Embeds>, i: &track::StepInputs) -> Result<track::Out, String> { run_track_step(self.v, &self.dir, f, i) }
+            fn init(&mut self, f: &Arc<Embeds>, m: Vec<f32>, _tag: &str) -> Result<track::Out, String> { run_track_init(self.v, &self.dir, f, m) }
+            fn step(&mut self, f: &Arc<Embeds>, i: &track::StepInputs, _tag: &str) -> Result<track::Out, String> { run_track_step(self.v, &self.dir, f, i) }
         }
         ort_rt::init_ort(&lib).unwrap();
         let n = (0..).take_while(|i| dir.join(format!("ref{i}.u8")).exists()).count();
@@ -675,7 +838,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         track::reset(1);
         for i in 0..n {
-            be.cur = Some(Arc::new(Embeds { embed: rd(format!("f{i}_embed.f32")), hr0: rd(format!("f{i}_hr0.f32")), hr1: rd(format!("f{i}_hr1.f32")), det: None }));
+            be.cur = Some(Arc::new(Embeds { embed: rd(format!("f{i}_embed.f32")), hr0: rd(format!("f{i}_hr0.f32")), hr1: rd(format!("f{i}_hr1.f32")), det: None, remote: None }));
             let r = Request { node: 1, frame: i as i64, anchor: 0, numbers: &[1], dir: track::DIR_FWD, key: "e2e".into(),
                               anchor_insts: (i == 0).then_some(&insts[..]), mw: S, mh: S };
             assert!(matches!(track::frame(&r, &mut be).unwrap(), Frame::Objects(_)));
@@ -694,6 +857,80 @@ mod tests {
         }
         eprintln!("e2e_track: {n} frames in {:.1}s, IoU min {iou_min:.5}, worst |diff| {worst}/255 (frame {worst_f})", t0.elapsed().as_secs_f64());
         assert!(iou_min > 0.999, "Rust tracking differs from the reference");
+    }
+
+    /// Remote == Local on the whole pipeline (ignored; needs a GPU box + a cwtools-infer
+    /// API 2 server with the same SAM3 files):
+    ///   CWSEG_E2E_DIR=<dir> CWSEG_ORT_LIB=<lib> CWSEG_REMOTE=http://host:port cargo test -p cwsegment --lib e2e_remote -- --ignored
+    /// <dir> as for e2e_local_text. Concept 0 is detected on a still, its first object is
+    /// tracked over CWSEG_FRAMES (20) frames that pan the still 4 px a frame, once Local and
+    /// once Remote; prints the differences (numbers only).
+    #[test]
+    #[ignore]
+    fn e2e_remote_parity() {
+        use crate::track::{self, Frame, Request};
+        let dir = std::path::PathBuf::from(std::env::var("CWSEG_E2E_DIR").expect("CWSEG_E2E_DIR"));
+        let lib = std::env::var("CWSEG_ORT_LIB").unwrap_or_default();
+        let server = std::env::var("CWSEG_REMOTE").expect("CWSEG_REMOTE");
+        let n: usize = std::env::var("CWSEG_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+        let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("image.json")).unwrap()).unwrap();
+        let (w, h) = (meta["w"].as_u64().unwrap() as usize, meta["h"].as_u64().unwrap() as usize);
+        let still = Rgb8 { w, h, data: std::fs::read(dir.join("image.rgb")).unwrap() };
+        let concept = meta["concepts"][0].as_str().unwrap().to_string();
+        let pan = |k: usize| {
+            let mut d = vec![0u8; w * h * 3];
+            for y in 0..h {
+                for x in 0..w {
+                    let sx = x.saturating_sub(4 * k);
+                    d[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&still.data[(y * w + sx) * 3..(y * w + sx) * 3 + 3]);
+                }
+            }
+            Rgb8 { w, h, data: d }
+        };
+        let frames: Vec<Rgb8> = (0..n).map(pan).collect();
+        let keys: Vec<String> = frames.iter().map(|f| format!("par_{}", crate::imgutil::frame_key(f))).collect();
+        let run = |v: &Values, node: usize| -> (Vec<Instance>, Vec<Vec<u8>>, f64) {
+            let t0 = std::time::Instant::now();
+            let insts = segment_instances(&keys[0], &frames[0], &[concept.clone()], v, 32).unwrap();
+            assert!(!insts.is_empty(), "no '{concept}' found");
+            track::reset(node);
+            let mut masks = Vec::new();
+            for k in 0..n {
+                let mut be = TrackBackend { v, fk: &keys[k], img: &frames[k] };
+                let r = Request { node, frame: k as i64, anchor: 0, numbers: &[1], dir: track::DIR_FWD, key: "par".into(),
+                                  anchor_insts: (k == 0).then_some(&insts[..]), mw: w, mh: h };
+                assert!(matches!(track::frame(&r, &mut be).unwrap(), Frame::Objects(_)));
+                masks.push(track::raw(node, k as i64).unwrap().remove(0));
+            }
+            track::reset(node);
+            (insts, masks, t0.elapsed().as_secs_f64())
+        };
+        let mut lv = Values::for_test(dir.join("models").to_str().unwrap(), &lib, true);
+        lv.cache = false;
+        let mut rv = Values::for_test(dir.join("models").to_str().unwrap(), &lib, true);
+        rv.cache = false;
+        rv.mode = 0;
+        rv.server = server.clone();
+        let (li, lm, lt) = run(&lv, 11);
+        let (ri, rm, rt) = run(&rv, 12);
+        let score_d = li.iter().zip(&ri).map(|(a, b)| (a.score - b.score).abs()).fold(0f32, f32::max);
+        let inst_d = li.iter().zip(&ri).map(|(a, b)| a.mask.iter().zip(&b.mask).map(|(x, y)| (*x as i32 - *y as i32).abs()).max().unwrap_or(0)).max().unwrap_or(0);
+        let (mut worst, mut iou_min) = (0i32, 1f64);
+        for (a, b) in lm.iter().zip(&rm) {
+            worst = worst.max(a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).abs()).max().unwrap_or(0));
+            let (mut i, mut u) = (0usize, 0usize);
+            for (x, y) in a.iter().zip(b) {
+                i += (*x >= 128 && *y >= 128) as usize;
+                u += (*x >= 128 || *y >= 128) as usize;
+            }
+            iou_min = iou_min.min(if u == 0 { 1.0 } else { i as f64 / u as f64 });
+        }
+        let area = |m: &[u8]| m.iter().filter(|v| **v >= 128).count() as f64 / m.len() as f64 * 100.0;
+        eprintln!("e2e_remote: '{concept}' local {} / remote {} instances, score max|diff| {score_d:.2e}, instance mask max|diff| {inst_d}/255", li.len(), ri.len());
+        eprintln!("e2e_remote: {n} tracked frames, IoU min {iou_min:.5}, mask max|diff| {worst}/255, area {:.1}% -> {:.1}%", area(&lm[0]), area(&lm[n - 1]));
+        eprintln!("e2e_remote: local {lt:.1} s, remote {rt:.1} s");
+        assert_eq!(li.len(), ri.len(), "instance count differs");
+        assert!(iou_min > 0.999, "Remote tracking differs from Local");
     }
 
     #[test]

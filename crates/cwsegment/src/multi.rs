@@ -143,22 +143,14 @@ pub fn render_multi(
     if tracking && crate::log::verbose() {
         crate::log::log(&format!("track: render time {time} -> frame {fr} (anchor {}, objects {})", v.track_anchor, crate::track::format_list(&v.track_list)));
     }
-    let local_track = tracking && v.mode == 1;
 
     // ── objects ───────────────────────────────────────────────────────
-    let ropts = crate::remote::RemoteOpts {
-        server: v.server.clone(),
-        timeout_s: v.timeout,
-        best_only: v.best_only,
-        score_threshold: v.score_threshold,
-        jpeg_quality: 88,
-    };
     let t0 = std::time::Instant::now();
-    // Concepts: Remote (also with an exemplar box) or Local text-only (Local has
-    // no exemplar boxes: points / box there go the single-object tracker path).
-    let result: Result<Arc<Vec<Instance>>, String> = if local_track && fr != v.track_anchor {
+    // Concepts: text only (no exemplar boxes: points / box go the single-object
+    // tracker path). Local and Remote run the same graphs.
+    let result: Result<Arc<Vec<Instance>>, String> = if tracking && fr != v.track_anchor {
         Ok(Arc::new(Vec::new()))
-    } else if !concepts.is_empty() && (v.mode == 0 || !has_geo) {
+    } else if !concepts.is_empty() && !has_geo {
         let key = format!(
             "inst|{}|{}|{fk}|{:?}|{:.2}|{}|{:?}",
             v.mode, if v.mode == 1 { &v.model_dir } else { &v.server }, concepts, v.score_threshold, v.max_objects, prompts.bbox
@@ -169,11 +161,7 @@ pub fn render_multi(
                 if aborted() {
                     return kOfxStatOK;
                 }
-                let r = if v.mode == 1 {
-                    crate::local::segment_instances(&fk, &img8, &concepts, v, v.max_objects)
-                } else {
-                    crate::remote::segment_instances(&fk, &img8, &concepts, prompts.bbox, &ropts, v.max_objects)
-                };
+                let r = crate::local::segment_instances(&fk, &img8, &concepts, v, v.max_objects);
                 r.map(|mut insts| {
                     for i in insts.iter_mut() {
                         if i.w != mw || i.h != mh {
@@ -203,11 +191,7 @@ pub fn render_multi(
                 if aborted() {
                     return kOfxStatOK;
                 }
-                let r = if v.mode == 1 {
-                    crate::local::segment(&fk, &img8, &p, v)
-                } else {
-                    crate::remote::segment(&fk, &img8, &p, &ropts).map(|r| r.mask)
-                };
+                let r = crate::local::segment(&fk, &img8, &p, v);
                 r.map(|m| {
                     let m = if m.w != mw || m.h != mh { imgutil::bilinear_gray(&m, mw, mh) } else { m };
                     let inst = Instance {
@@ -237,7 +221,7 @@ pub fn render_multi(
     if let Ok(a) = &result {
         insts = (**a).clone();
         objects::order(&mut insts, v.order);
-        if !(local_track && fr != v.track_anchor) {
+        if !(tracking && fr != v.track_anchor) {
             if let Ok(mut last) = LAST_DET.lock() {
                 last.get_or_insert_with(HashMap::new).insert(node, (fr, g.clone(), Arc::new(insts.clone())));
             }
@@ -245,9 +229,9 @@ pub fn render_multi(
     }
     // concepts the Object Channels slots count (Concept #): the picked objects once there are some
     let mut slot_concepts = concepts.clone();
-    // Picked objects without tracking (Track Off, or Remote): on the anchor frame the
+    // Picked objects without tracking (Track Off): on the anchor frame the
     // output carries just them, in list order, as tracking would.
-    if !v.track_list.is_empty() && !local_track && !v.picking && fr == v.track_anchor {
+    if !v.track_list.is_empty() && !tracking && !v.picking && fr == v.track_anchor {
         let picked: Vec<Instance> = v
             .track_list
             .iter()
@@ -258,7 +242,7 @@ pub fn render_multi(
         slot_concepts = insts.iter().map(|i| i.concept.clone()).collect();
     }
     let mut note: Option<String> = None; // viewer text on a frame not tracked yet
-    if local_track {
+    if tracking {
         let key = track_key(v, &concepts, mw, mh);
         let c0 = cwtools_core::image::clip_frame_range(eh, kOfxImageEffectSimpleSourceClipName).map_or(0, |r| r.0.round() as i64);
         let num = |f: i64| f - c0 + v.track_base; // Flame's frame number
@@ -358,7 +342,7 @@ pub fn render_multi(
         crate::set_node_message(eh, shown.as_deref());
     }
     match &result {
-        _ if local_track => {}
+        _ if tracking => {}
         Ok(_) => {
             set_last_list(node, objects::list_lines(&insts, &concepts));
             if tracking {

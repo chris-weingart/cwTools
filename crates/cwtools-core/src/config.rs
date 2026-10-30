@@ -10,8 +10,8 @@
 //!    `/Library/Application Support/cwTools/cwtools.conf`
 //!
 //! Keys (all optional): `models_dir`, `refine_models`, `matte_models`,
-//! `segment_models`, `remote_server` (cwRefine / cwMatte Device = Remote),
-//! `segment_server` (cwSegment Remote), `ort_lib` (`auto` or a path).
+//! `segment_models`, `remote_server` (the cwtools-infer server of the Remote
+//! mode of cwSegment, cwRefine and cwMatte), `ort_lib` (`auto` or a path).
 //!
 //! A node param that is set explicitly always wins over the config; an empty
 //! param means "from cwtools.conf".
@@ -27,7 +27,10 @@ pub const SYSTEM_DIR: &str = "/Library/Application Support/cwTools";
 #[cfg(not(target_os = "macos"))]
 pub const SYSTEM_DIR: &str = "/opt/cwTools";
 
-pub const KEYS: [&str; 7] = ["models_dir", "refine_models", "matte_models", "segment_models", "remote_server", "segment_server", "ort_lib"];
+pub const KEYS: [&str; 6] = ["models_dir", "refine_models", "matte_models", "segment_models", "remote_server", "ort_lib"];
+/// Keys of older versions, ignored without a note (`segment_server`: cwSegment's
+/// separate SAM3 server before 0.3.1; its Remote mode now uses `remote_server`).
+pub const RETIRED: [&str; 1] = ["segment_server"];
 
 /// The resolved settings (defaults filled in).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,10 +41,8 @@ pub struct Config {
     pub refine_models: String,
     pub matte_models: String,
     pub segment_models: String,
-    /// cwtools-infer server for cwRefine / cwMatte Remote ("" = none configured).
+    /// cwtools-infer server for cwSegment / cwRefine / cwMatte Remote ("" = none configured).
     pub remote_server: String,
-    /// SAM3 server for cwSegment Remote ("" = none configured).
-    pub segment_server: String,
     /// "auto" or a library path.
     pub ort_lib: String,
 }
@@ -76,6 +77,9 @@ pub fn parse(text: &str) -> (Vec<(String, String)>, Vec<String>) {
         if v.len() >= 2 && ((v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\''))) {
             v = &v[1..v.len() - 1];
         }
+        if RETIRED.contains(&k.as_str()) {
+            continue;
+        }
         if !KEYS.contains(&k.as_str()) {
             notes.push(format!("line {}: unknown key '{k}' ignored", no + 1));
             continue;
@@ -97,7 +101,6 @@ impl Config {
             matte_models: sub("matte_models", "cwMatte"),
             segment_models: sub("segment_models", "cwSegment"),
             remote_server: get("remote_server").unwrap_or_default(),
-            segment_server: get("segment_server").unwrap_or_default(),
             ort_lib: get("ort_lib").unwrap_or_else(|| "auto".to_string()),
             models_dir,
             source,
@@ -113,12 +116,11 @@ impl Config {
     pub fn describe(&self) -> String {
         let q = |s: &str| if s.is_empty() { "(none)".to_string() } else { s.to_string() };
         format!(
-            "refine_models={} matte_models={} segment_models={} remote_server={} segment_server={} ort_lib={}",
+            "refine_models={} matte_models={} segment_models={} remote_server={} ort_lib={}",
             self.refine_models,
             self.matte_models,
             self.segment_models,
             q(&self.remote_server),
-            q(&self.segment_server),
             self.ort_lib
         )
     }
@@ -299,9 +301,9 @@ mod tests {
         let (kv, notes) = parse(
             "# comment\n\n  models_dir = /m \nREMOTE_SERVER=http://h:8201\nsegment_server = \"http://s:8199\"\nbogus = 1\nnot a pair\nmodels_dir = /m2\n",
         );
+        // segment_server (retired) is dropped without a note
         assert_eq!(kv, vec![
             ("remote_server".to_string(), "http://h:8201".to_string()),
-            ("segment_server".to_string(), "http://s:8199".to_string()),
             ("models_dir".to_string(), "/m2".to_string()),
         ]);
         assert_eq!(notes.len(), 2);
@@ -315,7 +317,7 @@ mod tests {
         assert!(c.refine_models.ends_with("/models/cwRefine"));
         assert!(c.matte_models.ends_with("/models/cwMatte"));
         assert!(c.segment_models.ends_with("/models/cwSegment"));
-        assert_eq!((c.remote_server.as_str(), c.segment_server.as_str(), c.ort_lib.as_str()), ("", "", "auto"));
+        assert_eq!((c.remote_server.as_str(), c.ort_lib.as_str()), ("", "auto"));
         let (kv, _) = parse("models_dir = /x\nmatte_models = /b\nort_lib =\n");
         let c = Config::from_pairs(None, &kv);
         assert_eq!((c.refine_models.as_str(), c.matte_models.as_str(), c.segment_models.as_str()), ("/x/cwRefine", "/b", "/x/cwSegment"));

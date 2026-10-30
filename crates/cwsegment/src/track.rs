@@ -16,6 +16,10 @@
 //!
 //! Frames are tracked as Flame renders them: frame f needs f-1 (forward) or
 //! f+1 (backward) done. Results stay cached per node, so scrubbing back is free.
+//!
+//! Local keeps each frame's memory in this process; Remote keeps it in the
+//! server's tensor store ([`Mem::Remote`], a handle) and the bank only moves
+//! handles, so a step uploads the frame and downloads the 288² mask.
 
 use crate::imgutil::Gray;
 use crate::objects::Instance;
@@ -36,17 +40,25 @@ pub const DIR_FWD: i32 = 1;
 pub const DIR_BACK: i32 = 2;
 pub const DIR_BOTH: i32 = 3;
 
+/// One frame's spatial memory [64·72·72]: here (Local) or in the server's tensor store (Remote).
+#[derive(Clone, Debug)]
+pub enum Mem {
+    Local(Arc<Vec<f32>>),
+    Remote(String),
+}
+
 /// One frame's memory of one object.
 #[derive(Clone)]
 pub struct Entry {
     /// None once the frame is too far back for the spatial memory (pointer kept).
-    pub mem: Option<Arc<Vec<f32>>>,
+    pub mem: Option<Mem>,
     pub ptr: Vec<f32>,
 }
 
 /// track_step.onnx inputs for one object on one frame.
 pub struct StepInputs {
-    pub feats: Vec<f32>,
+    /// memories in mem_feats order (concatenated along axis 0)
+    pub mems: Vec<Mem>,
     pub tpos: Vec<i64>,
     pub ptrs: Vec<f32>,
     pub offs: Vec<f32>,
@@ -57,6 +69,27 @@ impl StepInputs {
     }
     pub fn n_ptr(&self) -> usize {
         self.offs.len()
+    }
+    /// mem_feats for a local run.
+    pub fn feats_local(&self) -> Result<Vec<f32>, String> {
+        let mut f = Vec::with_capacity(self.mems.len() * MEM_LEN);
+        for m in &self.mems {
+            match m {
+                Mem::Local(v) => f.extend_from_slice(v),
+                Mem::Remote(_) => return Err("internal: server-side tracking memory in a Local run (reset the track)".into()),
+            }
+        }
+        Ok(f)
+    }
+    /// mem_feats as server handles for a Remote run.
+    pub fn feats_remote(&self) -> Result<Vec<String>, String> {
+        self.mems
+            .iter()
+            .map(|m| match m {
+                Mem::Remote(h) => Ok(h.clone()),
+                Mem::Local(_) => Err("internal: local tracking memory in a Remote run (reset the track)".to_string()),
+            })
+            .collect()
     }
 }
 
@@ -90,11 +123,11 @@ impl Bank {
             let unsel = self.cond.iter().filter(|c| !picked.contains(&c.0)).collect();
             (sel, unsel)
         };
-        let mut feats: Vec<f32> = Vec::new();
+        let mut mems: Vec<Mem> = Vec::new();
         let mut tpos: Vec<i64> = Vec::new();
         for (_, e) in &sel {
             if let Some(m) = &e.mem {
-                feats.extend_from_slice(m);
+                mems.push(m.clone());
                 tpos.push(0);
             }
         }
@@ -102,7 +135,7 @@ impl Bank {
             let prev = f - k * sign;
             let e = self.track.get(&prev).or_else(|| unsel.iter().find(|c| c.0 == prev).map(|c| &c.1));
             if let Some(Entry { mem: Some(m), .. }) = e {
-                feats.extend_from_slice(m);
+                mems.push(m.clone());
                 tpos.push(k);
             }
         }
@@ -124,20 +157,24 @@ impl Bank {
                 offs.push(d as f32);
             }
         }
-        StepInputs { feats, tpos, ptrs, offs }
+        StepInputs { mems, tpos, ptrs, offs }
     }
 
     /// Drop what frames `fwd` (forward frontier) and `back` (backward frontier)
     /// can no longer reach: spatial memories more than 6 frames, pointers more
-    /// than 15 frames away from both.
-    pub fn forget(&mut self, fwd: i64, back: i64) {
+    /// than 15 frames away from both. Returns the server handles of the dropped memories.
+    pub fn forget(&mut self, fwd: i64, back: i64) -> Vec<String> {
         let dist = |t: i64| (t - fwd).abs().min((t - back).abs());
-        self.track.retain(|t, _| dist(*t) < MAX_PTRS);
+        let mut gone = Vec::new();
         for (t, e) in self.track.iter_mut() {
             if dist(*t) >= NUM_MASKMEM {
-                e.mem = None;
+                if let Some(Mem::Remote(h)) = e.mem.take() {
+                    gone.push(h);
+                }
             }
         }
+        self.track.retain(|t, _| dist(*t) < MAX_PTRS);
+        gone
     }
 }
 
@@ -184,6 +221,8 @@ pub enum Frame {
 pub const MAX_BATCH: usize = 300;
 
 struct Session {
+    /// unique per session (server handles of its memories start with t/<node>/<gen>/)
+    gen: u64,
     key: String,
     anchor: i64,
     numbers: Vec<usize>,
@@ -278,12 +317,31 @@ pub fn range(node: usize, key: &str) -> Option<(i64, i64)> {
     (s.key == key && !s.frames.is_empty()).then_some((s.back, s.fwd))
 }
 
+static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// Handle prefixes of ended sessions whose server-side memories the next Remote call drops.
+static ENDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn session_prefix(node: usize, gen: u64) -> String {
+    format!("t/{node}/{gen}/")
+}
+fn ended(s: &Session, node: usize) {
+    if let Ok(mut g) = ENDED.lock() {
+        g.push(session_prefix(node, s.gen));
+    }
+}
+/// Prefixes of ended sessions (taken once).
+pub fn take_ended() -> Vec<String> {
+    ENDED.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+}
+
 /// Forget the node's tracking (a running job stops after its current frame).
 pub fn reset(node: usize) {
     cancel_job(node);
     if let Ok(mut g) = SESSIONS.lock() {
         if let Some(m) = g.as_mut() {
-            m.remove(&node);
+            if let Some(s) = m.remove(&node) {
+                ended(&s, node);
+            }
         }
     }
     if let Ok(mut g) = STORE.lock() {
@@ -298,7 +356,11 @@ pub fn reset_all() {
         cancel_job(n);
     }
     if let Ok(mut g) = SESSIONS.lock() {
-        *g = None;
+        if let Some(m) = g.take() {
+            for (node, s) in m {
+                ended(&s, node);
+            }
+        }
     }
     if let Ok(mut g) = STORE.lock() {
         *g = None;
@@ -343,19 +405,22 @@ fn to_logits(p: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// The backend: model folder features + the two graphs (local.rs implements it;
-/// tests use a fake).
+/// The backend: model folder features + the two graphs (local.rs implements it for
+/// Local and Remote; tests use a fake). `tag` names the memory a call makes
+/// (`t/<node>/<gen>/<frame>/<object>`): Remote keeps it on the server under that handle.
 pub trait Backend {
     type Feat;
     fn features(&mut self) -> Result<Self::Feat, String>;
-    fn init(&mut self, f: &Self::Feat, mask: Vec<f32>) -> Result<Out, String>;
-    fn step(&mut self, f: &Self::Feat, inp: &StepInputs) -> Result<Out, String>;
+    fn init(&mut self, f: &Self::Feat, mask: Vec<f32>, tag: &str) -> Result<Out, String>;
+    fn step(&mut self, f: &Self::Feat, inp: &StepInputs, tag: &str) -> Result<Out, String>;
+    /// Memories the bank no longer needs (Remote: drop them on the server).
+    fn release(&mut self, _handles: Vec<String>) {}
 }
 pub struct Out {
     pub low: Vec<f32>,
     pub obj: f32,
     pub ptr: Vec<f32>,
-    pub mem: Vec<f32>,
+    pub mem: Mem,
 }
 
 pub struct Request<'a> {
@@ -377,14 +442,20 @@ pub fn frame<B: Backend>(r: &Request, be: &mut B) -> Result<Frame, String> {
     let taken = SESSIONS.lock().map_err(|_| "track lock poisoned".to_string())?.get_or_insert_with(HashMap::new).remove(&r.node);
     let mut s = match taken {
         Some(s) if s.key == r.key => s,
-        _ => Session {
-            key: r.key.clone(),
-            anchor: r.anchor,
-            numbers: r.numbers.to_vec(),
-            banks: Vec::new(),
-            fwd: r.anchor,
-            back: r.anchor,
-        },
+        old => {
+            if let Some(o) = &old {
+                ended(o, r.node);
+            }
+            Session {
+                gen: GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                key: r.key.clone(),
+                anchor: r.anchor,
+                numbers: r.numbers.to_vec(),
+                banks: Vec::new(),
+                fwd: r.anchor,
+                back: r.anchor,
+            }
+        }
     };
     let res = advance(&mut s, r, be);
     if let Ok(mut g) = SESSIONS.lock() {
@@ -439,11 +510,12 @@ fn advance<B: Backend>(s: &mut Session, r: &Request, be: &mut B) -> Result<Step,
         let feat = be.features()?;
         let mut out: FrameMasks = Vec::new();
         let mut banks = Vec::new();
-        for n in r.numbers {
-            let o = be.init(&feat, letterbox_mask(&insts[n - 1]))?;
+        for (k, n) in r.numbers.iter().enumerate() {
+            let tag = format!("{}{}/{k}", session_prefix(r.node, s.gen), r.anchor);
+            let o = be.init(&feat, letterbox_mask(&insts[n - 1]), &tag)?;
             check(&o)?;
             let mut b = Bank::default();
-            b.cond.push((r.anchor, Entry { mem: Some(Arc::new(o.mem)), ptr: o.ptr }));
+            b.cond.push((r.anchor, Entry { mem: Some(o.mem), ptr: o.ptr }));
             banks.push(b);
             out.push((to_u8(&o.low), o.obj));
         }
@@ -463,11 +535,12 @@ fn advance<B: Backend>(s: &mut Session, r: &Request, be: &mut B) -> Result<Step,
     };
     let feat = be.features()?;
     let mut out: FrameMasks = Vec::new();
-    for b in s.banks.iter_mut() {
+    for (k, b) in s.banks.iter_mut().enumerate() {
         let inp = b.inputs(r.frame, reverse);
-        let o = be.step(&feat, &inp)?;
+        let tag = format!("{}{}/{k}", session_prefix(r.node, s.gen), r.frame);
+        let o = be.step(&feat, &inp, &tag)?;
         check(&o)?;
-        b.track.insert(r.frame, Entry { mem: Some(Arc::new(o.mem)), ptr: o.ptr });
+        b.track.insert(r.frame, Entry { mem: Some(o.mem), ptr: o.ptr });
         out.push((to_u8(&o.low), o.obj));
     }
     if reverse {
@@ -476,8 +549,12 @@ fn advance<B: Backend>(s: &mut Session, r: &Request, be: &mut B) -> Result<Step,
         s.fwd = r.frame;
     }
     let (fwd, back) = (s.fwd, s.back);
+    let mut gone = Vec::new();
     for b in s.banks.iter_mut() {
-        b.forget(fwd, back);
+        gone.extend(b.forget(fwd, back));
+    }
+    if !gone.is_empty() {
+        be.release(gone);
     }
     store_put(r.node, s, r.frame, &out);
     Ok(Step::Masks(out))
@@ -486,10 +563,15 @@ fn advance<B: Backend>(s: &mut Session, r: &Request, be: &mut B) -> Result<Step,
 /// Model outputs must be finite and the right size (a non-finite memory would
 /// poison every later frame).
 fn check(o: &Out) -> Result<(), String> {
-    if o.low.len() != LR * LR || o.ptr.len() != PTR_LEN || o.mem.len() != MEM_LEN {
-        return Err(format!("unexpected tracker output sizes {} / {} / {}", o.low.len(), o.ptr.len(), o.mem.len()));
+    // a Remote memory stays on the server, which checked it for NaN/Inf
+    let mem: &[f32] = match &o.mem {
+        Mem::Local(m) => m,
+        Mem::Remote(_) => &[],
+    };
+    if o.low.len() != LR * LR || o.ptr.len() != PTR_LEN || (matches!(o.mem, Mem::Local(_)) && mem.len() != MEM_LEN) {
+        return Err(format!("unexpected tracker output sizes {} / {} / {}", o.low.len(), o.ptr.len(), mem.len()));
     }
-    if !o.obj.is_finite() || o.ptr.iter().chain(&o.mem).any(|x| !x.is_finite()) {
+    if !o.obj.is_finite() || o.ptr.iter().chain(mem).any(|x| !x.is_finite()) {
         return Err("the tracker produced non-finite values (GPU / memory problem?)".into());
     }
     Ok(())
@@ -500,7 +582,10 @@ mod tests {
     use super::*;
 
     fn entry(v: f32) -> Entry {
-        Entry { mem: Some(Arc::new(vec![v; 2])), ptr: vec![v; 1] }
+        Entry { mem: Some(Mem::Local(Arc::new(vec![v; 2]))), ptr: vec![v; 1] }
+    }
+    fn firsts(i: &StepInputs) -> Vec<f32> {
+        i.mems.iter().map(|m| match m { Mem::Local(v) => v[0], Mem::Remote(_) => f32::NAN }).collect()
     }
 
     /// Same choices as sam3_track.py `Bank.inputs` (memory = anchor + 6 back,
@@ -514,7 +599,7 @@ mod tests {
         }
         let i = b.inputs(31, false);
         assert_eq!(i.tpos, vec![0, 6, 5, 4, 3, 2, 1]);
-        assert_eq!(i.feats.iter().step_by(2).copied().collect::<Vec<_>>(), vec![100.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0]);
+        assert_eq!(firsts(&i), vec![100.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0]);
         // anchor pointer (offset 21) + 15 frames back
         assert_eq!(i.offs[0], 21.0);
         assert_eq!(i.offs[1..].to_vec(), (1..16).map(|d| d as f32).collect::<Vec<_>>());
@@ -544,7 +629,7 @@ mod tests {
         }
         let i = b.inputs(50, false);
         // closest before (40), closest after (60), then the nearest two (20, 80: tie in cond order)
-        assert_eq!(i.feats.iter().step_by(2).copied().collect::<Vec<_>>(), vec![40.0, 60.0, 20.0, 80.0]);
+        assert_eq!(firsts(&i), vec![40.0, 60.0, 20.0, 80.0]);
         assert_eq!(i.tpos, vec![0, 0, 0, 0]);
         // pointers: every anchor up to frame 50 in cond order
         assert_eq!(i.offs, vec![50.0, 30.0, 10.0]);
@@ -556,7 +641,7 @@ mod tests {
         for f in 0..40 {
             b.track.insert(f, entry(f as f32));
         }
-        b.forget(39, 30);
+        assert!(b.forget(39, 30).is_empty()); // local memories: nothing to drop on a server
         assert!(!b.track.contains_key(&14)); // 16 from back frontier 30
         assert!(b.track.contains_key(&15));
         assert!(b.track[&23].mem.is_none()); // 7 from frontier 30
@@ -578,13 +663,13 @@ mod tests {
         fn features(&mut self) -> Result<(), String> {
             Ok(())
         }
-        fn init(&mut self, _f: &(), mask: Vec<f32>) -> Result<Out, String> {
+        fn init(&mut self, _f: &(), mask: Vec<f32>, _tag: &str) -> Result<Out, String> {
             self.calls.push(format!("init {}", mask.iter().filter(|v| **v > 0.5).count()));
-            Ok(Out { low: vec![5.0; LR * LR], obj: 10.0, ptr: vec![0.0; PTR_LEN], mem: vec![0.0; MEM_LEN] })
+            Ok(Out { low: vec![5.0; LR * LR], obj: 10.0, ptr: vec![0.0; PTR_LEN], mem: Mem::Local(Arc::new(vec![0.0; MEM_LEN])) })
         }
-        fn step(&mut self, _f: &(), inp: &StepInputs) -> Result<Out, String> {
+        fn step(&mut self, _f: &(), inp: &StepInputs, _tag: &str) -> Result<Out, String> {
             self.calls.push(format!("step mem={} ptr={}", inp.n_mem(), inp.n_ptr()));
-            Ok(Out { low: vec![-5.0; LR * LR], obj: 3.0, ptr: vec![0.0; PTR_LEN], mem: vec![0.0; MEM_LEN] })
+            Ok(Out { low: vec![-5.0; LR * LR], obj: 3.0, ptr: vec![0.0; PTR_LEN], mem: Mem::Local(Arc::new(vec![0.0; MEM_LEN])) })
         }
     }
 

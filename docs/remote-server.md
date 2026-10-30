@@ -1,7 +1,7 @@
 # Remote server
 
-cwRefine and cwMatte can run their model on a separate Linux GPU machine
-instead of the workstation's GPU. This is useful when Flame leaves too
+cwSegment, cwRefine and cwMatte can run their models on a separate Linux GPU
+machine instead of the workstation's GPU. This is useful when Flame leaves too
 little VRAM for large crops or the 2048 models, or on workstations without a
 suitable GPU.
 
@@ -50,5 +50,10 @@ connect to the server's address and port, or Remote renders time out.
 
 Protocol details: [server/API.md](../server/API.md).
 
-cwSegment's Remote mode uses a separate SAM3 server, which isn't part of
-this package yet.
+cwSegment runs several SAM3 models per frame (image encoder, detector,
+decoder, tracker). The server keeps a frame's encoder features and each
+tracked object's memory between requests, so a frame is uploaded once and
+only masks come back. That store lives in the server's RAM:
+`CWINFER_STORE_MB` (default 4096) caps it, and entries unused for
+`CWINFER_STORE_IDLE_S` (default 1800 s) are dropped. If the server restarts
+during tracking, cwSegment asks you to reset the track.

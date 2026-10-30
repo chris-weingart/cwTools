@@ -2,7 +2,9 @@
 # must match the sha256 here (archives are only containers). Release assets: one archive per set,
 # cwtools-models-<set>.tar.gz (+ .sha256), each < 2 GiB (GitHub's limit per release asset).
 # default: p = installed by default for the plugin, l = for the plugin on Linux only (GPU models),
-# m = for the plugin on macOS only (CPU models), s = for the Remote server, - = optional
+# m = for the plugin on macOS only (CPU models), s = for the Remote server, - = optional,
+# r = with the plugin in every models mode, Remote-only (skip) too (small files the plugin itself
+# reads, such as the SAM3 tokenizer for text prompts)
 # family: Remote server model folder (- = plugin only). Refresh sha/size: make_package.sh --update-models-tsv DIR
 #set	tool	family	default	licence	file	sha256	bytes
 refine-mematte	cwRefine	mematte	ps	MEMatte_LICENSE.txt	mematte_vitb_core.onnx	e28776ff0f0f0287f4f28a9cf923a815a06c1567b236334555aa613ca9445fe5	441008693
@@ -13,12 +15,12 @@ matte-general-1536	cwMatte	birefnet	ls	BiRefNet_LICENSE.txt	BiRefNet_dynamic-gen
 matte-general-1536	cwMatte	birefnet	ls	BiRefNet_LICENSE.txt	BiRefNet_dynamic-general-epoch_174_1536_gs_fp16.json	2ffb7b01583c006398bd5ccd75197cb270153e2eb4892336dbc7161285093c62	1306
 matte-lite	cwMatte	birefnet	ps	BiRefNet_LICENSE.txt	BiRefNet-general-bb_swin_v1_tiny-epoch_232_gs.onnx	5ac07424bee888340e578e1e6ac98590e8e9a4a53820b5bcbc27d4768b2ac33c	181586026
 matte-lite	cwMatte	birefnet	ps	BiRefNet_LICENSE.txt	BiRefNet-general-bb_swin_v1_tiny-epoch_232_gs.json	ba56bdde850b4e189023ebff2c7e013a8cb996d512d8755bc4da7bde3ae4db3f	1325
-segment-sam3	cwSegment	-	p	SAM_LICENSE.txt	encoder_fp16.onnx	01e29920648f9087982db9b57484e7752d6083c1693a8283155c98e610cecd31	930233712
-segment-sam3	cwSegment	-	p	SAM_LICENSE.txt	decoder.onnx	c42409bba84f70ebdf24f0995b43d7ca53b1666be335bb69345df00e1875c8f3	22481176
-segment-sam3-text	cwSegment	-	p	SAM_LICENSE.txt	text_encoder.onnx	498f5bfa5adebec83b952d98d2c4d568a9fe882e944b5ba9af168ec2b46c3870	1413230531
-segment-sam3-text	cwSegment	-	p	SAM_LICENSE.txt	detector.onnx	36cfef8412097c735b7c1a86883e3757db73e9b4944992e50dd930500d346cb4	97072082
-segment-sam3-text	cwSegment	-	p	SAM_LICENSE.txt	vocab.json	5047b556ce86ccaf6aa22b3ffccfc52d391ea4accdab9c2f2407da5b742d4363	862328
-segment-sam3-text	cwSegment	-	p	SAM_LICENSE.txt	merges.txt	9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a	524619
+segment-sam3	cwSegment	sam3	ps	SAM_LICENSE.txt	encoder_fp16.onnx	01e29920648f9087982db9b57484e7752d6083c1693a8283155c98e610cecd31	930233712
+segment-sam3	cwSegment	sam3	ps	SAM_LICENSE.txt	decoder.onnx	c42409bba84f70ebdf24f0995b43d7ca53b1666be335bb69345df00e1875c8f3	22481176
+segment-sam3-text	cwSegment	sam3	ps	SAM_LICENSE.txt	text_encoder.onnx	498f5bfa5adebec83b952d98d2c4d568a9fe882e944b5ba9af168ec2b46c3870	1413230531
+segment-sam3-text	cwSegment	sam3	ps	SAM_LICENSE.txt	detector.onnx	36cfef8412097c735b7c1a86883e3757db73e9b4944992e50dd930500d346cb4	97072082
+segment-sam3-tokenizer	cwSegment	-	r	SAM_LICENSE.txt	vocab.json	5047b556ce86ccaf6aa22b3ffccfc52d391ea4accdab9c2f2407da5b742d4363	862328
+segment-sam3-tokenizer	cwSegment	-	r	SAM_LICENSE.txt	merges.txt	9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a	524619
 segment-sam3-cpu	cwSegment	-	m	SAM_LICENSE.txt	encoder.onnx	532793548337841d562ee5de87f68fd3c991836f969d678cd04254e4c78dcb71	1859990621
-segment-sam3-track	cwSegment	-	p	SAM_LICENSE.txt	track_init.onnx	77d14c7973e599019d53dcab0a580ba70d29b577a797184b9e85315eb16a0fa2	21924300
-segment-sam3-track	cwSegment	-	p	SAM_LICENSE.txt	track_step.onnx	3d31daeda5ea55a49db662f2c447d043b0e6bb30ae1f26638fe28cb2b7f665d6	64382598
+segment-sam3-track	cwSegment	sam3	ps	SAM_LICENSE.txt	track_init.onnx	77d14c7973e599019d53dcab0a580ba70d29b577a797184b9e85315eb16a0fa2	21924300
+segment-sam3-track	cwSegment	sam3	ps	SAM_LICENSE.txt	track_step.onnx	3d31daeda5ea55a49db662f2c447d043b0e6bb30ae1f26638fe28cb2b7f665d6	64382598

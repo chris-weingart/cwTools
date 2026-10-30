@@ -1,10 +1,10 @@
 //! cwSegment — OpenFX plugin that segments objects with SAM.
 //!
 //! Two backends:
-//!  - Remote: POSTs a downscaled JPEG of the frame + prompts to the SAM3 server
-//!    and upscales the returned mask.
-//!  - Local: runs SAM encoder/decoder ONNX through onnxruntime (Flame's bundled
+//!  - Local: runs the SAM3 ONNX graphs through onnxruntime (Flame's bundled
 //!    libonnxruntime 1.22, CUDA EP when available).
+//!  - Remote: the same graphs on a cwtools-infer server (crate::sam_remote);
+//!    everything around them is shared with Local.
 //!
 //! Built on cwtools-core (hand-written OFX FFI, C shim for variadics, suites,
 //! params, images, ORT, HTTP, logging, panic guards).
@@ -21,7 +21,7 @@ pub mod objects;
 mod ofx_api;
 mod params;
 pub mod prompt;
-pub mod remote;
+pub(crate) mod sam_remote;
 pub mod track;
 mod multi;
 mod render;

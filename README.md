@@ -1,7 +1,9 @@
-<p align="center"><picture><source media="(prefers-color-scheme: light)" srcset="docs/img/cwTools-light.svg"><img src="docs/img/cwTools.svg" alt="cw│Tools" height="64"></picture></p>
+<h1 align="center">cwTools</h1>
 
-<p align="center"><b>ML matting nodes for Autodesk Flame.</b><br>
-Segment, refine and clean up mattes right in Batch, as native OpenFX nodes with full parameter control.</p>
+<p align="center"><b>ML matting and foreground tools for Autodesk Flame.</b><br>
+Segment and refine mattes, then fix the foreground's edge colour, right in Batch,
+as native OpenFX nodes with full parameter control.<br>
+Runs on the workstation, or optionally on a <a href="#remote-gpu-server-optional">shared GPU server</a> on your network.</p>
 
 <!-- screenshot / GIF of a Batch tree: mask -> refine -> clean -->
 
@@ -9,27 +11,28 @@ Segment, refine and clean up mattes right in Batch, as native OpenFX nodes with 
 
 From plate to composite-ready edge.
 
-Each tool installs on its own, so take only the ones you need.
+Each tool installs on its own, so take only the ones you need, or get the
+[full suite](#full-suite): all four tools and the Remote server in one package.
 
 <table>
 <tr>
 <td rowspan="2" width="120"><b>1</b>&ensp;Mask</td>
-<td><a href="docs/cwSegment.md"><picture><source media="(prefers-color-scheme: light)" srcset="docs/img/cwSegment-light.svg"><img src="docs/img/cwSegment.svg" alt="cwSegment" height="48"></picture></a></td>
+<td><a href="docs/cwSegment.md"><b>cwSegment</b></a></td>
 <td>Object masks from a prompt: text, points or a box. Many objects at once.</td>
 </tr>
 <tr>
-<td><a href="docs/cwMatte.md"><picture><source media="(prefers-color-scheme: light)" srcset="docs/img/cwMatte-light.svg"><img src="docs/img/cwMatte.svg" alt="cwMatte" height="48"></picture></a></td>
+<td><a href="docs/cwMatte.md"><b>cwMatte</b></a></td>
 <td>Automatic matte of the main subject, no prompt needed.</td>
 </tr>
 <tr>
 <td width="120"><b>2</b>&ensp;Refine</td>
-<td><a href="docs/cwRefine.md"><picture><source media="(prefers-color-scheme: light)" srcset="docs/img/cwRefine-light.svg"><img src="docs/img/cwRefine.svg" alt="cwRefine" height="48"></picture></a></td>
-<td>Rough mask to production matte with hair detail.</td>
+<td><a href="docs/cwRefine.md"><b>cwRefine</b></a></td>
+<td>Rough mask to production matte with fine detail.</td>
 </tr>
 <tr>
-<td width="120"><b>3</b>&ensp;Clean</td>
-<td><a href="docs/cwFill.md"><picture><source media="(prefers-color-scheme: light)" srcset="docs/img/cwFill-light.svg"><img src="docs/img/cwFill.svg" alt="cwFill" height="48"></picture></a></td>
-<td>Clean edge colour and despill. Runs in any OFX host.</td>
+<td width="120"><b>3</b>&ensp;Foreground</td>
+<td><a href="docs/cwFill.md"><b>cwFill</b></a></td>
+<td>True foreground colour in the soft edge, plus despill. No model needed, runs in any OFX host.</td>
 </tr>
 </table>
 
@@ -85,9 +88,10 @@ prepared for Flame's Inference node. See [Your own models](docs/custom-models.md
 
 ## Remote GPU server (optional)
 
-cwRefine and cwMatte can send the model step to a separate Linux GPU
-machine, so the large models work next to Flame and on workstations without
-a big GPU. Local and Remote give the same matte.
+cwSegment, cwRefine and cwMatte can send the model steps to a separate Linux
+GPU machine, so the large models work next to Flame and on workstations
+without a big GPU, such as Macs. cwSegment tracks Remote too. Local and Remote
+give the same matte.
 See [Remote server](docs/remote-server.md).
 
 ## Full suite

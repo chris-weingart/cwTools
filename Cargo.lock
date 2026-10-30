@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "cwmatte"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cwtools-core",
  "cwtools-remote",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "cwrefine"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cwtools-core",
  "cwtools-remote",
@@ -103,10 +103,11 @@ dependencies = [
 
 [[package]]
 name = "cwsegment"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "cwtools-core",
+ "cwtools-remote",
  "jpeg-encoder",
  "ort",
  "png",
@@ -116,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "cwtools-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cc",
  "ort",
@@ -126,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "cwtools-remote"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "crc32fast",
  "serde_json",

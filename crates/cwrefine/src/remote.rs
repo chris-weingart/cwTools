@@ -45,6 +45,7 @@ pub fn infer(v: &Values, prep: &Prepared, time: f64) -> Result<Vec<f32>, String>
         }
     };
     let req = rc::Request {
+        keep: Vec::new(),
         model: name.clone(),
         sha256: sha,
         inputs: vec![input],

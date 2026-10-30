@@ -30,6 +30,7 @@ pub mod color;
 pub mod config;
 pub mod contour;
 pub mod guard;
+pub mod half;
 pub mod http;
 pub mod image;
 pub mod log;

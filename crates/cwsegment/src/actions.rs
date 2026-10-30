@@ -29,10 +29,12 @@ pub fn action_describe(effect_handle: OfxImageEffectHandle) -> OfxStatus {
     prop_set_string(props, kOfxPropIcon, 1, b"cwSegment.png\0");
     cwtools_core::version::describe_props(
         props,
-        "SAM object segmentation: text / point / box / mask prompts -> mask. Remote (SAM3 server) or Local (ONNX).",
+        "SAM object segmentation: text / point / box / mask prompts -> mask. Local (ONNX) or Remote (cwtools-infer server).",
     );
     prop_set_string(props, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter);
-    prop_set_string(props, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat);
+    for (i, d) in cwtools_core::image::SUPPORTED_DEPTHS.iter().enumerate() {
+        prop_set_string(props, kOfxImageEffectPropSupportedPixelDepths, i as i32, d);
+    }
     prop_set_int(props, kOfxImageEffectPropSupportsTiles, 0, 0);
     prop_set_int(props, kOfxImageEffectPropSupportsMultipleClipDepths, 0, 0);
     // Track Range fetches other frames of the Source during one render.
@@ -84,11 +86,13 @@ pub fn action_describe_in_context(effect_handle: OfxImageEffectHandle, _in_args:
     kOfxStatOK
 }
 
-pub fn action_get_clip_preferences(_effect_handle: OfxImageEffectHandle, out_args: OfxPropertySetHandle) -> OfxStatus {
+pub fn action_get_clip_preferences(effect_handle: OfxImageEffectHandle, out_args: OfxPropertySetHandle) -> OfxStatus {
     prop_set_string(out_args, b"OfxImageClipPropComponents_Source\0", 0, kOfxImageComponentRGBA);
     prop_set_string(out_args, b"OfxImageClipPropComponents_Output\0", 0, kOfxImageComponentRGBA);
-    prop_set_string(out_args, b"OfxImageClipPropDepth_Source\0", 0, kOfxBitDepthFloat);
-    prop_set_string(out_args, b"OfxImageClipPropDepth_Output\0", 0, kOfxBitDepthFloat);
+    // one depth for all clips: the Source's (16-bit in = 16-bit out)
+    let depth = cwtools_core::image::pref_depth(effect_handle);
+    prop_set_string(out_args, b"OfxImageClipPropDepth_Source\0", 0, depth);
+    prop_set_string(out_args, b"OfxImageClipPropDepth_Output\0", 0, depth);
     kOfxStatOK
 }
 
@@ -140,7 +144,7 @@ fn frames_to_fetch(effect_handle: OfxImageEffectHandle, ps: OfxParamSetHandle, t
     let (from, to) = if from == 0 && to == 0 { (c0, c1) } else { (clip(from).min(clip(to)), clip(to)) };
     let anchor = params::get_int(ps, params::P_TRACK_ANCHOR, t) as i64;
     let dir = params::get_int(ps, params::P_TRACK, t);
-    let dir = if dir == crate::track::DIR_OFF { DIR_FWD } else { dir };
+    let dir = if dir == crate::track::DIR_OFF { DIR_BOTH } else { dir };
     let done = crate::track::status(node).map(|(_, a, b, _)| (a, b));
     let mut n = usize::from(done.is_none());
     if dir == DIR_FWD || dir == DIR_BOTH {
@@ -201,7 +205,7 @@ pub fn action_instance_changed(effect_handle: OfxImageEffectHandle, in_args: Ofx
             params::set_int(ps, params::P_CLICK_MODE, if arm { params::CLICK_TRACK } else { 0 });
             let list = params::get_string(ps, params::P_TRACK_LIST);
             if !arm && params::get_int(ps, params::P_TRACK, time) == crate::track::DIR_OFF && !list.trim().is_empty() {
-                params::set_int(ps, params::P_TRACK, crate::track::DIR_FWD);
+                params::set_int(ps, params::P_TRACK, crate::track::DIR_BOTH);
             }
             fill_range(effect_handle, ps, time, false);
             let anchor = params::get_int(ps, params::P_TRACK_ANCHOR, time) as f64;
@@ -244,7 +248,7 @@ pub fn action_instance_changed(effect_handle: OfxImageEffectHandle, in_args: Ofx
             crate::track::request_run(node);
             unsafe { (crate::param().paramEditBegin)(ps, b"cwSegment track range\0".as_ptr() as *const c_char) };
             if params::get_int(ps, params::P_TRACK, time) == crate::track::DIR_OFF {
-                params::set_int(ps, params::P_TRACK, crate::track::DIR_FWD);
+                params::set_int(ps, params::P_TRACK, crate::track::DIR_BOTH);
             }
             fill_range(effect_handle, ps, time, false);
             track_info(ps, "Track Range pressed");
@@ -340,8 +344,9 @@ pub fn action_instance_changed(effect_handle: OfxImageEffectHandle, in_args: Ofx
             kOfxStatOK
         }
         "testServer" => {
-            let url = params::read_values(ps, prop_get_double_or(in_args, kOfxPropTime, 0.0)).server;
-            match crate::remote::health(&url, 5.0) {
+            let v = params::read_values(ps, prop_get_double_or(in_args, kOfxPropTime, 0.0));
+            let url = v.server.clone();
+            match crate::sam_remote::test_server(&url, &crate::local::model_folder(&v)) {
                 Ok(info) => crate::set_node_message(effect_handle, Some(&format!("Server OK: {info}"))),
                 Err(e) => crate::set_node_message(effect_handle, Some(&format!("Server FAILED ({url}): {e}"))),
             }

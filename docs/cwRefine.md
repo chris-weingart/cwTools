@@ -1,5 +1,3 @@
-<p><picture><source media="(prefers-color-scheme: light)" srcset="img/cwRefine-light.svg"><img src="img/cwRefine.svg" alt="cwRefine" height="56"></picture></p>
-
 # cwRefine
 
 Turns a rough mask into a production matte with hair and soft-edge detail.

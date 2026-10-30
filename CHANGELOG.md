@@ -5,6 +5,42 @@ Each node shows it in Flame as the read-only **Version** parameter. While the
 version is 0.x only the minor number moves, because Flame matches saved setups on
 the major version. cwFill has its own version (tags `cwfill-vX.Y.Z`).
 
+## 0.3.1 (2026-10-30)
+
+**cwSegment Remote** runs the same SAM3 models on the cwtools-infer server,
+the one cwMatte and cwRefine use. Masks and tracking match Local (identical
+on the same GPU in our tests), and tracking now works Remote too. Each frame
+is sent once, losslessly; the server keeps its features and the tracking
+memory, so only masks come back. The Server URL defaults to `remote_server`;
+the separate SAM3 server, the `segment_server` setting and Send Size are gone
+(Remote uses the same 1008 px image as Local). Timeout goes up to 120 s, and
+Test Server checks that the server has the same SAM3 files.
+
+**cwtools-infer** (server API 2): a tensor store keeps model outputs on the
+server between requests (`keep`, `refs`, `/fetch`, `/forget`, checked with a
+CRC on every use, limited by `CWINFER_STORE_MB` and `CWINFER_STORE_IDLE_S`);
+a model can run on the server's CPU (`ep.device`); `CWINFER_MAX_SESSIONS`
+counts model families, so one tool's graphs share a slot, and defaults to 3
+(was 2), so a cwSegment → cwMatte → cwRefine tree no longer reloads a model
+on every frame. `--server` installs
+the SAM3 models by default (about 2.5 GB).
+
+**Bit depth:** every node now outputs the Source clip's bit depth (8-bit,
+16-bit integer, 16-bit half or 32-bit float) instead of always 32-bit float.
+Flame gives all clips of an OFX node one depth; the nodes now ask for the
+Source's. Non-float images are converted to float for processing and back on
+output (integers clamped to 0..1). cwFill already kept half plates as half;
+its 8-bit and 16-bit integer sources came out as float.
+
+**cwFill 0.3.2** (own version): the bit-depth fix above; nothing else changed.
+
+Installer: one Remote server line for all three tools; a 0.3.0 server is
+flagged when cwSegment is chosen. The cwSegment tokenizer (`vocab.json`,
+`merges.txt`) is its own 1.4 MB model set, `segment-sam3-tokenizer`, installed
+with cwSegment in every models mode: text prompts now work on Remote-only
+workstations (`--models skip`), which before got the checksums but not the
+tokenizer.
+
 ## 0.3.0 (2026-10-29): first public release
 
 All nodes: the Server URL, Model Folder and ONNX Runtime fields show the values

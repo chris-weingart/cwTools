@@ -247,6 +247,10 @@ pub const kOfxImageComponentRGBA: &[u8] = b"OfxImageComponentRGBA\0";
 pub const kOfxImageComponentRGB: &[u8] = b"OfxImageComponentRGB\0";
 pub const kOfxImageComponentAlpha: &[u8] = b"OfxImageComponentAlpha\0";
 pub const kOfxBitDepthFloat: &[u8] = b"OfxBitDepthFloat\0";
+pub const kOfxBitDepthHalf: &[u8] = b"OfxBitDepthHalf\0";
+pub const kOfxBitDepthShort: &[u8] = b"OfxBitDepthShort\0";
+pub const kOfxBitDepthByte: &[u8] = b"OfxBitDepthByte\0";
+pub const kOfxImageClipPropUnmappedPixelDepth: &[u8] = b"OfxImageClipPropUnmappedPixelDepth\0";
 
 // Image props (in render)
 pub const kOfxImagePropData: &[u8] = b"OfxImagePropData\0";

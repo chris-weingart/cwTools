@@ -10,7 +10,7 @@ exclude = ["crates/cwfill"]
 # ONE version for the whole cwTools suite (plugins + core + remote). Bump it per
 # install cycle (scripts/install_beta.sh records it); tag the commit vX.Y.Z.
 # Minor bumps only while 0.x: Flame keys saved setups on the major version.
-version = "0.3.0"
+version = "0.3.1"
 
 [profile.release]
 opt-level = 3

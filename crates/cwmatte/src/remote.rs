@@ -89,6 +89,7 @@ pub fn infer(v: &Values, m: &Meta, name: &str, sha: &str, input: Vec<f32>, squar
         }
     };
     let req = rc::Request {
+        keep: Vec::new(),
         model: name.to_string(),
         sha256: sha.to_string(),
         inputs: vec![t],

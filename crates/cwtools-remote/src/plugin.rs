@@ -132,7 +132,7 @@ pub fn model_info(server: &str, name: &str, sha: &str, timeout_s: f64) -> Result
         g.retain(|(s, _, _)| s != server);
         g.push((server.to_string(), Instant::now(), list));
     }
-    found.ok_or_else(|| RemoteError { status: 404, code: "unknown_model".into(), msg: format!("{name} is not in the server's /models list") })
+    found.ok_or_else(|| RemoteError { status: 404, code: "unknown_model".into(), msg: format!("{name} is not in the server's /models list"), missing: Vec::new() })
 }
 
 /// Forget the cached model lists (Test Server, after a 409).
@@ -212,7 +212,7 @@ mod tests {
     }
     #[test]
     fn messages() {
-        let e = |s: u16, c: &str| RemoteError { status: s, code: c.into(), msg: "m".into() };
+        let e = |s: u16, c: &str| RemoteError { status: s, code: c.into(), msg: "m".into(), missing: Vec::new() };
         assert!(artist_message(&e(409, "sha_mismatch"), "S", "M", 30.0).contains("sha256 mismatch"));
         assert!(artist_message(&e(0, "timeout"), "S", "M", 30.0).contains("within 30 s"));
         assert!(artist_message(&e(0, "unreachable"), "S", "M", 30.0).contains("unreachable"));

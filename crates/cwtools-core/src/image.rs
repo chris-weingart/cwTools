@@ -2,8 +2,11 @@
 //! arbitrary pixel bounds rectangle and row stride; the helpers here convert to
 //! the TOP-DOWN buffers in [`crate::pixels`] at the boundary.
 //!
-//! Only 32-bit float images are accepted (every cwTools plugin requests float
-//! clip depth; half-float casts are garbage in ACEScg).
+//! Images are 32-bit float to the plugins. An 8-bit, 16-bit or half clip is
+//! converted to an f32 copy on fetch (integers to 0..1), and the Output copy
+//! back on release ([`fetch_image`] / [`release`]), never read as f32 in place.
+//! All clips of a node share one depth (Flame has no multiple clip depths):
+//! [`pref_depth`] takes the Source's, so the result has the plate's bit depth.
 
 use crate::ofx_api::*;
 use crate::props::{prop_get_int, prop_get_pointer, prop_get_rect_i, prop_get_string};
@@ -16,6 +19,24 @@ pub struct Image {
     pub bounds: OfxRectI,
     pub row_bytes: i32,
     pub n_comps: i32,
+    /// Not a float clip: `data` points into this f32 copy of the host buffer.
+    stage: Option<Stage>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Depth {
+    Byte,
+    Short,
+    Half,
+}
+
+struct Stage {
+    depth: Depth,
+    host: *mut u8,
+    host_row_bytes: i32,
+    buf: Vec<f32>,
+    /// Output clip: convert back to the host buffer on release.
+    write_back: bool,
 }
 
 impl Image {
@@ -216,16 +237,105 @@ pub fn fetch_image(effect_handle: OfxImageEffectHandle, name: &[u8], time: f64) 
         _ => 0,
     };
     let depth = prop_get_string(ip, kOfxImageEffectPropPixelDepth, 0);
-    if data.is_null() || n_comps == 0 || (depth != "OfxBitDepthFloat" && !depth.is_empty()) {
+    let staged = match depth.as_str() {
+        "OfxBitDepthFloat" | "" => None,
+        "OfxBitDepthHalf" => Some(Depth::Half),
+        "OfxBitDepthShort" => Some(Depth::Short),
+        "OfxBitDepthByte" => Some(Depth::Byte),
+        _ => {
+            crate::log::log(&format!("unsupported image depth on clip: {depth}"));
+            unsafe { (effect().clipReleaseImage)(ip) };
+            return None;
+        }
+    };
+    if data.is_null() || n_comps == 0 {
         crate::log::log(&format!("unsupported image on clip: comps={comps} depth={depth}"));
         unsafe { (effect().clipReleaseImage)(ip) };
         return None;
     }
-    Some(Image { props: ip, data, bounds, row_bytes, n_comps })
+    let Some(d) = staged else {
+        return Some(Image { props: ip, data, bounds, row_bytes, n_comps, stage: None });
+    };
+    let write_back = name == kOfxImageEffectOutputClipName;
+    let mut st = Stage { depth: d, host: data, host_row_bytes: row_bytes, buf: Vec::new(), write_back };
+    let (f_row_bytes, f_data) = unsafe { stage_in(&mut st, bounds, n_comps) };
+    Some(Image { props: ip, data: f_data, bounds, row_bytes: f_row_bytes, n_comps, stage: Some(st) })
 }
 
+/// One host component -> f32 (integers to 0..1).
+#[inline]
+unsafe fn read_comp(d: Depth, row: *const u8, i: usize) -> f32 {
+    match d {
+        Depth::Byte => *row.add(i) as f32 / 255.0,
+        Depth::Short => (row as *const u16).add(i).read_unaligned() as f32 / 65535.0,
+        Depth::Half => crate::half::f16_to_f32((row as *const u16).add(i).read_unaligned()),
+    }
+}
+
+/// f32 -> one host component (integers: clamp to 0..1, round; NaN -> 0).
+#[inline]
+unsafe fn write_comp(d: Depth, row: *mut u8, i: usize, v: f32) {
+    let q = |max: f32| if v.is_nan() { 0.0 } else { (v.clamp(0.0, 1.0) * max).round() };
+    match d {
+        Depth::Byte => *row.add(i) = q(255.0) as u8,
+        Depth::Short => (row as *mut u16).add(i).write_unaligned(q(65535.0) as u16),
+        Depth::Half => (row as *mut u16).add(i).write_unaligned(crate::half::f32_to_f16(v)),
+    }
+}
+
+/// Fill the stage with the f32 copy of its host buffer; returns the copy's
+/// (row bytes, data pointer). An Output copy starts as zeros (it is written, not read).
+unsafe fn stage_in(st: &mut Stage, b: OfxRectI, n_comps: i32) -> (i32, *mut u8) {
+    let w = (b.x2 - b.x1).max(0) as usize;
+    let h = (b.y2 - b.y1).max(0) as usize;
+    let rl = w * n_comps as usize;
+    st.buf = vec![0f32; rl * h];
+    if !st.write_back {
+        for r in 0..h {
+            let s = st.host.offset(r as isize * st.host_row_bytes as isize);
+            for (i, d) in st.buf[r * rl..(r + 1) * rl].iter_mut().enumerate() {
+                *d = read_comp(st.depth, s, i);
+            }
+        }
+    }
+    ((rl * 4) as i32, st.buf.as_mut_ptr() as *mut u8)
+}
+
+/// Release an image from [`fetch_image`]. A staged Output gets its f32 copy
+/// written back first (half: nearest even; integers: clamped 0..1, rounded).
 pub fn release(img: &Image) {
+    if let Some(st) = img.stage.as_ref().filter(|s| s.write_back) {
+        let rl = img.w() * img.n_comps as usize;
+        for r in 0..img.h() {
+            let d = unsafe { st.host.offset(r as isize * st.host_row_bytes as isize) };
+            for (i, v) in st.buf[r * rl..(r + 1) * rl].iter().enumerate() {
+                unsafe { write_comp(st.depth, d, i, *v) };
+            }
+        }
+    }
     unsafe { (effect().clipReleaseImage)(img.props) };
+}
+
+/// Depths every cwTools plugin declares (kOfxImageEffectPropSupportedPixelDepths).
+pub const SUPPORTED_DEPTHS: [&[u8]; 4] = [kOfxBitDepthFloat, kOfxBitDepthHalf, kOfxBitDepthShort, kOfxBitDepthByte];
+
+/// Clip depth for getClipPreferences: the Source clip's (8-bit, 16-bit, half),
+/// else float. Every clip of the node gets this one depth.
+pub fn pref_depth(effect_handle: OfxImageEffectHandle) -> &'static [u8] {
+    let mut clip: OfxImageClipHandle = std::ptr::null_mut();
+    let mut cp: OfxPropertySetHandle = std::ptr::null_mut();
+    let src = kOfxImageEffectSimpleSourceClipName;
+    let st = unsafe { (effect().clipGetHandle)(effect_handle, src.as_ptr() as *const c_char, &mut clip, &mut cp) };
+    let d = if st == kOfxStatOK && !cp.is_null() { prop_get_string(cp, kOfxImageClipPropUnmappedPixelDepth, 0) } else { String::new() };
+    if crate::log::verbose() {
+        crate::log::log(&format!("clip preferences: Source unmapped depth {d:?}"));
+    }
+    match d.as_str() {
+        "OfxBitDepthHalf" => kOfxBitDepthHalf,
+        "OfxBitDepthShort" => kOfxBitDepthShort,
+        "OfxBitDepthByte" => kOfxBitDepthByte,
+        _ => kOfxBitDepthFloat,
+    }
 }
 
 /// Box-downscale channels `chans` of an OFX image (bottom-up) to a top-down
@@ -271,4 +381,46 @@ pub fn clip_pref_components_key(name: &str) -> Vec<u8> {
 /// Clip-preference key for clip `name`: `OfxImageClipPropDepth_<name>\0`.
 pub fn clip_pref_depth_key(name: &str) -> Vec<u8> {
     format!("OfxImageClipPropDepth_{name}\0").into_bytes()
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+
+    #[test]
+    fn integer_and_half_components_roundtrip() {
+        // every 8-bit and 16-bit code survives read -> write exactly
+        let mut b = [0u8; 256];
+        for (i, v) in b.iter_mut().enumerate() {
+            *v = i as u8;
+        }
+        let mut o = [0u8; 256];
+        let mut s = vec![0u16; 65536];
+        for (i, v) in s.iter_mut().enumerate() {
+            *v = i as u16;
+        }
+        let mut so = vec![0u16; 65536];
+        unsafe {
+            for i in 0..256 {
+                write_comp(Depth::Byte, o.as_mut_ptr(), i, read_comp(Depth::Byte, b.as_ptr(), i));
+            }
+            for i in 0..65536 {
+                let v = read_comp(Depth::Short, s.as_ptr() as *const u8, i);
+                write_comp(Depth::Short, so.as_mut_ptr() as *mut u8, i, v);
+            }
+        }
+        assert_eq!(b, o);
+        assert_eq!(s, so);
+    }
+
+    #[test]
+    fn integer_writes_clamp_and_zero_nan() {
+        let mut o = [7u8; 4];
+        unsafe {
+            for (i, v) in [-0.5f32, 1.7, f32::NAN, 0.5].iter().enumerate() {
+                write_comp(Depth::Byte, o.as_mut_ptr(), i, *v);
+            }
+        }
+        assert_eq!(o, [0, 255, 0, 128]);
+    }
 }

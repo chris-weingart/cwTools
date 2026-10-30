@@ -45,7 +45,91 @@ unsafe impl Sync for View {}
 struct Image {
     props: OfxPropertySetHandle,
     view: View,
-    half: bool, // OfxBitDepthHalf: 16-bit components, converted around the f32 core
+    depth: Depth, // not Float: components converted around the f32 core
+}
+
+/// Clip bit depth. All but Float are converted to f32 copies for the solve and
+/// back on output (integers = 0..1, clamped and rounded on the way back).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Depth {
+    Float,
+    Half,
+    Short,
+    Byte,
+}
+
+impl Depth {
+    fn from_ofx(s: &[u8]) -> Depth {
+        match s {
+            b"OfxBitDepthHalf" => Depth::Half,
+            b"OfxBitDepthShort" => Depth::Short,
+            b"OfxBitDepthByte" => Depth::Byte,
+            _ => Depth::Float,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Depth::Float => "float",
+            Depth::Half => "half",
+            Depth::Short => "16-bit",
+            Depth::Byte => "8-bit",
+        }
+    }
+    /// The OFX depth string, for getClipPreferences.
+    pub fn ofx(self) -> &'static [u8] {
+        match self {
+            Depth::Float => b"OfxBitDepthFloat\0",
+            Depth::Half => b"OfxBitDepthHalf\0",
+            Depth::Short => b"OfxBitDepthShort\0",
+            Depth::Byte => b"OfxBitDepthByte\0",
+        }
+    }
+    /// The Source clip's depth (unmapped = as the plate is), Float if unknown.
+    pub fn of_source(effect_handle: OfxImageEffectHandle) -> Depth {
+        let mut clip: OfxImageClipHandle = std::ptr::null_mut();
+        let mut cp: OfxPropertySetHandle = std::ptr::null_mut();
+        let mut d: *mut c_char = std::ptr::null_mut();
+        unsafe {
+            let src = kOfxImageEffectSimpleSourceClipName;
+            if (effect().clipGetHandle)(effect_handle, src.as_ptr() as *const c_char, &mut clip, &mut cp) != kOfxStatOK || cp.is_null() {
+                return Depth::Float;
+            }
+            (crate::prop().propGetString)(cp, b"OfxImageClipPropUnmappedPixelDepth\0".as_ptr() as *const c_char, 0, &mut d);
+        }
+        if d.is_null() {
+            return Depth::Float;
+        }
+        Depth::from_ofx(unsafe { std::ffi::CStr::from_ptr(d) }.to_bytes())
+    }
+}
+
+#[inline]
+unsafe fn read_comp(d: Depth, row: *const u8, i: usize) -> f32 {
+    match d {
+        Depth::Byte => *row.add(i) as f32 / 255.0,
+        Depth::Short => (row as *const u16).add(i).read_unaligned() as f32 / 65535.0,
+        Depth::Half => f16_to_f32((row as *const u16).add(i).read_unaligned()),
+        Depth::Float => (row as *const f32).add(i).read_unaligned(),
+    }
+}
+
+#[inline]
+unsafe fn write_comp(d: Depth, row: *mut u8, i: usize, v: f32) {
+    let q = |max: f32| if v.is_nan() { 0.0 } else { (v.clamp(0.0, 1.0) * max).round() };
+    match d {
+        Depth::Byte => *row.add(i) = q(255.0) as u8,
+        Depth::Short => (row as *mut u16).add(i).write_unaligned(q(65535.0) as u16),
+        Depth::Half => (row as *mut u16).add(i).write_unaligned(f32_to_f16(v)),
+        Depth::Float => (row as *mut f32).add(i).write_unaligned(v),
+    }
+}
+
+fn comp_bytes(d: Depth) -> isize {
+    match d {
+        Depth::Byte => 1,
+        Depth::Short | Depth::Half => 2,
+        Depth::Float => 4,
+    }
 }
 
 fn fetch_image(clip_name: &[u8], effect_handle: OfxImageEffectHandle, time: f64) -> Option<Image> {
@@ -90,9 +174,9 @@ fn fetch_image(clip_name: &[u8], effect_handle: OfxImageEffectHandle, time: f64)
             &mut depth,
         );
     }
-    let half = !depth.is_null() && unsafe { std::ffi::CStr::from_ptr(depth) }.to_bytes() == b"OfxBitDepthHalf";
+    let depth = if depth.is_null() { Depth::Float } else { Depth::from_ofx(unsafe { std::ffi::CStr::from_ptr(depth) }.to_bytes()) };
 
-    Some(Image { props: img_props, view: View { data, bounds, row_bytes, n_comps }, half })
+    Some(Image { props: img_props, view: View { data, bounds, row_bytes, n_comps }, depth })
 }
 
 fn components_count(s: *mut c_char) -> i32 {
@@ -138,11 +222,11 @@ pub fn render(effect_handle: OfxImageEffectHandle, in_args: OfxPropertySetHandle
         }
     };
 
-    // Half buffers: the core works on f32 copies; the output is converted
-    // back over the render window.
+    // Half / 16-bit / 8-bit buffers: the core works on f32 copies; the output
+    // is converted back over the render window.
     let threads = par::default_threads();
-    let (_src_buf, src_v) = if src.half { half_to_f32(&src.view, threads) } else { (Vec::new(), src.view) };
-    let (_out_buf, out_v) = if out.half { f32_scratch(&out.view) } else { (Vec::new(), out.view) };
+    let (_src_buf, src_v) = if src.depth != Depth::Float { to_f32(&src.view, src.depth, threads) } else { (Vec::new(), src.view) };
+    let (_out_buf, out_v) = if out.depth != Depth::Float { f32_scratch(&out.view) } else { (Vec::new(), out.view) };
 
     // Only the RGBA path carries a matte (alpha). Without alpha there is no
     // matte to solve against → passthrough copy.
@@ -153,11 +237,11 @@ pub fn render(effect_handle: OfxImageEffectHandle, in_args: OfxPropertySetHandle
         let ctx = CacheCtx { instance: effect_handle as usize, time };
         solve_window(&src_v, &out_v, &win, &v, Some(ctx), threads)
     };
-    if out.half {
-        f32_to_half_window(&out_v, &out.view, &win, threads);
+    if out.depth != Depth::Float {
+        from_f32_window(&out_v, &out.view, out.depth, &win, threads);
     }
     if let Some(path) = debug_log_path() {
-        debug_log(path, effect_handle as usize, time, &win, &src_v, &v, &info, src.half, out.half);
+        debug_log(path, effect_handle as usize, time, &win, &src_v, &v, &info, src.depth, out.depth);
     }
     release(&src);
     release(&out);
@@ -179,7 +263,7 @@ fn debug_log_path() -> Option<&'static str> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn debug_log(path: &str, instance: usize, time: f64, win: &OfxRectI, src: &View, v: &Values, info: &RenderInfo, src_half: bool, out_half: bool) {
+fn debug_log(path: &str, instance: usize, time: f64, win: &OfxRectI, src: &View, v: &Values, info: &RenderInfo, src_depth: Depth, out_depth: Depth) {
     use std::io::Write;
     let (mut amin, mut amax, mut asum, mut n, mut n_band) = (f32::MAX, f32::MIN, 0f64, 0u64, 0u64);
     for y in win.y1..win.y2 {
@@ -200,7 +284,7 @@ fn debug_log(path: &str, instance: usize, time: f64, win: &OfxRectI, src: &View,
          crop={}x{} cacheHit={} solve={:.1}ms total={:.1}ms\n",
         env!("CARGO_PKG_VERSION"), instance, time, win.x1, win.y1, win.x2, win.y2, src.n_comps,
         amin, amax, if n > 0 { asum / n as f64 } else { 0.0 }, n_band,
-        if src_half { "half" } else { "float" }, if out_half { "half" } else { "float" },
+        src_depth.name(), out_depth.name(),
         v.soft_band_only as u8, v.output_mode, v.input_colorspace, v.edge_tone, v.despill_screen,
         v.screen_colour[0], v.screen_colour[1], v.screen_colour[2], v.residual_despill,
         v.despill_range, v.despill_softness, v.despill_soft_only as u8, v.despill_matte_thresh,
@@ -213,9 +297,9 @@ fn debug_log(path: &str, instance: usize, time: f64, win: &OfxRectI, src: &View,
     }
 }
 
-/// f32 copy of a half image (same bounds, tightly packed rows). The View
-/// points into the returned Vec, which must outlive it.
-fn half_to_f32(img: &View, threads: usize) -> (Vec<f32>, View) {
+/// f32 copy of a half / 16-bit / 8-bit image (same bounds, tightly packed rows).
+/// The View points into the returned Vec, which must outlive it.
+fn to_f32(img: &View, depth: Depth, threads: usize) -> (Vec<f32>, View) {
     let (w, h, n) = view_dims(img);
     let mut buf = vec![0f32; w * h * n];
     let pb = SendPtr(buf.as_mut_ptr());
@@ -223,9 +307,9 @@ fn half_to_f32(img: &View, threads: usize) -> (Vec<f32>, View) {
     par::row_chunks(h, par::threads_for(w * h, threads), |y0, y1| {
         let (pb, src) = (pb, src);
         for y in y0..y1 {
-            let s = unsafe { src.0.offset(y as isize * img.row_bytes as isize) } as *const u16;
+            let s = unsafe { src.0.offset(y as isize * img.row_bytes as isize) } as *const u8;
             for i in 0..w * n {
-                unsafe { *pb.0.add(y * w * n + i) = f16_to_f32(s.add(i).read_unaligned()) };
+                unsafe { *pb.0.add(y * w * n + i) = read_comp(depth, s, i) };
             }
         }
     });
@@ -233,7 +317,7 @@ fn half_to_f32(img: &View, threads: usize) -> (Vec<f32>, View) {
     (buf, v)
 }
 
-/// Zeroed f32 stand-in for a half output image (same bounds).
+/// Zeroed f32 stand-in for a non-float output image (same bounds).
 fn f32_scratch(img: &View) -> (Vec<f32>, View) {
     let (w, h, n) = view_dims(img);
     let mut buf = vec![0f32; w * h * n];
@@ -241,8 +325,8 @@ fn f32_scratch(img: &View) -> (Vec<f32>, View) {
     (buf, v)
 }
 
-/// Write the render window of an f32 view into a half image.
-fn f32_to_half_window(f: &View, out: &View, win: &OfxRectI, threads: usize) {
+/// Write the render window of an f32 view into a half / 16-bit / 8-bit image.
+fn from_f32_window(f: &View, out: &View, depth: Depth, win: &OfxRectI, threads: usize) {
     let n = out.n_comps.min(f.n_comps).max(0) as usize;
     let (x1, x2) = (win.x1.max(out.bounds.x1), win.x2.min(out.bounds.x2));
     let (y1, y2) = (win.y1.max(out.bounds.y1), win.y2.min(out.bounds.y2));
@@ -259,10 +343,10 @@ fn f32_to_half_window(f: &View, out: &View, win: &OfxRectI, threads: usize) {
                 unsafe {
                     let s = px(f, x, y);
                     let off = (y - out.bounds.y1) as isize * out.row_bytes as isize
-                        + (x - out.bounds.x1) as isize * out.n_comps as isize * 2;
-                    let d = dst.0.offset(off) as *mut u16;
+                        + (x - out.bounds.x1) as isize * out.n_comps as isize * comp_bytes(depth);
+                    let d = dst.0.offset(off);
                     for c in 0..n {
-                        d.add(c).write_unaligned(f32_to_f16(*s.add(c)));
+                        write_comp(depth, d, c, *s.add(c));
                     }
                 }
             }
@@ -1624,6 +1708,29 @@ mod tests {
     // ---- half-float I/O (16-bit in = 16-bit out) ----
 
     #[test]
+    fn integer_components_roundtrip_and_clamp() {
+        let b: Vec<u8> = (0..=255).collect();
+        let mut o = vec![0u8; 256];
+        let s: Vec<u16> = (0..=65535).collect();
+        let mut so = vec![0u16; 65536];
+        unsafe {
+            for i in 0..256 {
+                write_comp(Depth::Byte, o.as_mut_ptr(), i, read_comp(Depth::Byte, b.as_ptr(), i));
+            }
+            for i in 0..65536 {
+                let v = read_comp(Depth::Short, s.as_ptr() as *const u8, i);
+                write_comp(Depth::Short, so.as_mut_ptr() as *mut u8, i, v);
+            }
+            for (i, v) in [-0.5f32, 1.7, f32::NAN, 0.5].iter().enumerate() {
+                write_comp(Depth::Byte, o.as_mut_ptr(), i, *v);
+            }
+        }
+        assert_eq!(s, so);
+        assert_eq!(o[..4], [0, 255, 0, 128]);
+        assert_eq!(o[4..], b[4..]);
+    }
+
+    #[test]
     fn half_roundtrip_is_exact_for_every_finite_half() {
         for h in 0..=u16::MAX {
             let f = f16_to_f32(h);
@@ -1668,10 +1775,10 @@ mod tests {
         let mut out16 = vec![0u16; w * h * 4];
         let mk = |p: *mut u16| View { data: p as *mut u8, bounds: win, row_bytes: (w * 8) as i32, n_comps: 4 };
         let (sv, ov) = (mk(src16.as_mut_ptr()), mk(out16.as_mut_ptr()));
-        let (_sb, s32) = half_to_f32(&sv, 3);
+        let (_sb, s32) = to_f32(&sv, Depth::Half, 3);
         let (_ob, o32) = f32_scratch(&ov);
         solve_window(&s32, &o32, &win, &v, None, 2);
-        f32_to_half_window(&o32, &ov, &win, 3);
+        from_f32_window(&o32, &ov, Depth::Half, &win, 3);
         for i in 0..w * h * 4 {
             assert_eq!(out16[i], f32_to_f16(f32::from_bits(want[i])), "component {i}");
         }

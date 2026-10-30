@@ -27,7 +27,6 @@ pub const P_USE_BOX: &[u8] = b"useBox\0";
 pub const P_BOX_A: &[u8] = b"boxCornerA\0";
 pub const P_BOX_B: &[u8] = b"boxCornerB\0";
 pub const P_SERVER: &[u8] = b"serverUrl\0";
-pub const P_SEND_SIZE: &[u8] = b"sendSize\0";
 pub const P_TIMEOUT: &[u8] = b"timeoutSec\0";
 pub const P_MODEL_DIR: &[u8] = b"modelDir\0";
 pub const P_ORT_LIB: &[u8] = b"ortLibrary\0";
@@ -138,22 +137,21 @@ pub fn point_bg_name(i: usize) -> Vec<u8> {
     format!("point{}Bg\0", i + 1).into_bytes()
 }
 
-/// Remote with no server anywhere: the node message.
-pub const NO_SERVER_MSG: &str = "No Remote server configured: set segment_server in cwtools.conf or the Server URL field";
 
 /// Empty Server URL / Model Folder / ONNX Runtime of an existing node (older
 /// setup) get the values in effect, as a new node shows them.
 pub fn fill_setup_fields(ps: OfxParamSetHandle) {
     let cfg = cwtools_core::config::get();
     cwtools_core::params::fill_empty_strings(ps, &[
-        (P_SERVER, server_url("", &cfg.segment_server)),
+        (P_SERVER, server_url("", &cfg.remote_server)),
         (P_MODEL_DIR, cfg.segment_models.clone()),
         (P_ORT_LIB, cwtools_core::config::shown_ort_lib()),
     ]);
 }
 
 /// Server base URL: the Server URL text, or `configured` (cwtools.conf
-/// segment_server, "" = none configured) when it is empty.
+/// remote_server = the cwtools-infer server of cwMatte / cwRefine, "" = none
+/// configured) when it is empty.
 pub fn server_url(url: &str, configured: &str) -> String {
     let u = url.trim();
     if u.is_empty() { configured.trim().to_string() } else { u.to_string() }
@@ -180,7 +178,7 @@ const G_TRACK_INFO: &[u8] = b"grpTrackStatus\0";
 pub fn define_params(ps: OfxParamSetHandle) {
     // setup fields show what an empty field resolves to (cwtools.conf); clearing one still falls back at render
     let cfg = cwtools_core::config::get();
-    let (shown_server, shown_ort) = (server_url("", &cfg.segment_server), cwtools_core::config::shown_ort_lib());
+    let (shown_server, shown_ort) = (server_url("", &cfg.remote_server), cwtools_core::config::shown_ort_lib());
     // Flame panel: 5-row columns, a Choice = 2 rows, every group starts a column,
     // 6 columns a page (cwtools_core::params::grid); String labels are not shown,
     // so each String has a caption row. Page 1: Main / Output / R / G / B / Matte.
@@ -189,14 +187,14 @@ pub fn define_params(ps: OfxParamSetHandle) {
     caption(ps, b"capText\0", b"Text Prompt\0", G_MAIN);
     string(ps, P_TEXT, b"Text Prompt\0",
         b"What to segment, e.g. 'person' or several concepts 'person, sofa, dog'; each \
-          instance becomes an object. Local needs the SAM3 text models, Remote a SAM3 server \
-          with API v2. Empty = no mask unless Auto Concepts is on.\0",
+          instance becomes an object. Needs the SAM3 text models (Local: in the Model Folder; \
+          Remote: on the server). Empty = no mask unless Auto Concepts is on.\0",
         "", G_MAIN);
     choice(ps, P_MODE, b"Device\0",
-        b"Remote = SAM3 server (Remote group, or segment_server in cwtools.conf). Local = SAM3 \
-          ONNX on this workstation via Flame's onnxruntime (Local group; text prompts need the \
-          SAM3 text models in the Model Folder).\0",
-        &[b"Remote (SAM3 server)\0", b"Local (ONNX)\0"], 0, G_MAIN);
+        b"Remote = SAM3 on a cwtools-infer GPU server (the cwMatte / cwRefine server, Remote \
+          group): same models, results and tracking as Local. Local = SAM3 ONNX on this \
+          workstation (text prompts need the SAM3 text models in the Model Folder).\0",
+        &[b"Remote (server)\0", b"Local (ONNX)\0"], 0, G_MAIN);
     button(ps, P_RELEASE, b"Release GPU Memory\0",
         b"Unload the SAM encoder/decoder sessions shared by all cwSegment nodes and free their VRAM. The \
           next Local render reloads them (~3-5 s). Remote mode holds no local model.\0",
@@ -251,7 +249,7 @@ pub fn define_params(ps: OfxParamSetHandle) {
     let g = define(ps, kOfxParamTypeGroup, G_TRACK);
     label(g, b"Track\0");
     choice(ps, P_TRACK, b"Track\0",
-        b"Follow the picked objects from the Anchor Frame (SAM3 video memory, Local). Frames are \
+        b"Follow the picked objects from the Anchor Frame (SAM3 video memory). Frames are \
           tracked as they render in order from the anchor; results stay cached. Off = detect on \
           every frame.\0",
         &[b"Off\0", b"Forward\0", b"Backward\0", b"Both\0"], 0, G_TRACK);
@@ -349,31 +347,24 @@ pub fn define_params(ps: OfxParamSetHandle) {
     let g = define(ps, kOfxParamTypeGroup, G_REMOTE);
     label(g, b"Remote\0");
     caption(ps, b"capServer\0", b"Server URL\0", G_REMOTE);
-    string(ps, P_SERVER, b"Server URL\0", b"SAM3 server base URL, e.g. http://host:8199. Empty = segment_server from cwtools.conf.\0", &shown_server, G_REMOTE);
-    let p = define(ps, kOfxParamTypeInteger, P_SEND_SIZE);
-    label(p, b"Send Size\0");
-    hint(p, b"Longest edge (pixels) of the JPEG uploaded to the server. The mask comes back \
-               at this size and is upscaled. Smaller uploads faster on slow \
-               networks; 1024-1280 is a good range.\0");
-    prop_set_int(p, kOfxParamPropDefault, 0, 1280);
-    prop_set_int(p, kOfxParamPropMin, 0, 256);
-    prop_set_int(p, kOfxParamPropMax, 0, 4096);
-    prop_set_int(p, kOfxParamPropDisplayMin, 0, 256);
-    prop_set_int(p, kOfxParamPropDisplayMax, 0, 2048);
-    parent(p, G_REMOTE);
+    string(ps, P_SERVER, b"Server URL\0",
+        b"cwtools-infer server base URL, e.g. http://host:8201 (the cwMatte / cwRefine server). \
+          Empty = remote_server from cwtools.conf.\0",
+        &shown_server, G_REMOTE);
     let p = define(ps, kOfxParamTypeDouble, P_TIMEOUT);
     label(p, b"Timeout (s)\0");
-    hint(p, b"Give up on the server after this many seconds (max 15) and pass the plate \
-               through with an empty mask + a node message.\0");
-    prop_set_double(p, kOfxParamPropDefault, 0, 12.0);
-    prop_set_double(p, kOfxParamPropMin, 0, 1.0);
-    prop_set_double(p, kOfxParamPropMax, 0, 15.0);
-    prop_set_double(p, kOfxParamPropDisplayMin, 0, 1.0);
-    prop_set_double(p, kOfxParamPropDisplayMax, 0, 15.0);
+    hint(p, b"Give up on the server after this many seconds and pass the plate through with an \
+               empty mask + a node message. The first render after the server loaded the SAM3 \
+               models takes longest.\0");
+    prop_set_double(p, kOfxParamPropDefault, 0, cwtools_remote::plugin::DEFAULT_TIMEOUT_S);
+    prop_set_double(p, kOfxParamPropMin, 0, cwtools_remote::plugin::MIN_TIMEOUT_S);
+    prop_set_double(p, kOfxParamPropMax, 0, cwtools_remote::plugin::MAX_TIMEOUT_S);
+    prop_set_double(p, kOfxParamPropDisplayMin, 0, cwtools_remote::plugin::MIN_TIMEOUT_S);
+    prop_set_double(p, kOfxParamPropDisplayMax, 0, cwtools_remote::plugin::MAX_TIMEOUT_S);
     parent(p, G_REMOTE);
     button(ps, P_TEST_SERVER, b"Test Server\0",
-        b"Ping the server's health endpoint and report the result as a node message / in \
-          /tmp/cwSegment.log.\0",
+        b"Check the server: reachable, cwtools-infer with the tensor store, and the same SAM3 files \
+          as the Model Folder's checksums. Result as a node message / in /tmp/cwSegment.log.\0",
         G_REMOTE);
     let g = define(ps, kOfxParamTypeGroup, G_LOCAL);
     label(g, b"Local\0");
@@ -387,8 +378,9 @@ pub fn define_params(ps: OfxParamSetHandle) {
         true, G_LOCAL);
     caption(ps, b"capModelDir\0", b"Model Folder\0", G_LOCAL);
     string(ps, P_MODEL_DIR, b"Model Folder\0",
-        b"Folder with the SAM encoder/decoder ONNX files (see README). Empty = the installed models \
-          folder (cwtools.conf).\0",
+        b"Folder with the SAM3 ONNX files (see README). Empty = the installed models folder \
+          (cwtools.conf). Remote needs only its SHA256SUMS (which files the server must have) and, \
+          for text prompts, the tokenizer (vocab.json, merges.txt).\0",
         &cfg.segment_models, G_LOCAL);
     cwtools_core::version::define_param(ps, G_LOCAL);
     let g = define(ps, kOfxParamTypeGroup, G_RUNTIME);
@@ -524,7 +516,6 @@ pub struct Values {
     pub box_canon: Option<(f64, f64, f64, f64)>,
     pub points: Vec<UserPoint>,
     pub server: String,
-    pub send_size: i32,
     pub timeout: f64,
     pub model_dir: String,
     pub ort_lib: String,
@@ -557,7 +548,7 @@ impl Values {
         Values {
             mode: 1, text: String::new(), use_matte: false, matte_as: 0, invert: false, output: 0, colorspace: 0,
             cache: false, soft: true, best_only: false, score_threshold: 0.4, box_canon: None, points: Vec::new(),
-            server: String::new(), send_size: 1008, timeout: 30.0, model_dir: model_dir.into(), ort_lib: ort_lib.into(),
+            server: String::new(), timeout: 30.0, model_dir: model_dir.into(), ort_lib: ort_lib.into(),
             use_gpu, free_vram: true, order: 0, sels: Vec::new(), picks: Vec::new(), max_objects: 32, id_labels: false,
             list_in_message: false, vlm_auto: 0,
             vlm: crate::vlm::VlmOpts { url: String::new(), model: String::new(), api_key: String::new(), detail: 0,
@@ -583,7 +574,7 @@ pub fn read_values(ps: OfxParamSetHandle, t: f64) -> Values {
         }
     }
     let cfg = cwtools_core::config::get();
-    let server = server_url(&get_string(ps, P_SERVER), &cfg.segment_server);
+    let server = server_url(&get_string(ps, P_SERVER), &cfg.remote_server);
     let sels: Vec<crate::objects::Sel> = (0..n_slots())
         .map(|k| crate::objects::Sel { kind: get_int(ps, &slot_sel_name(k), t), index: get_int(ps, &slot_idx_name(k), t) })
         .collect();
@@ -615,8 +606,7 @@ pub fn read_values(ps: OfxParamSetHandle, t: f64) -> Values {
         box_canon,
         points,
         server,
-        send_size: get_int(ps, P_SEND_SIZE, t).clamp(256, 4096),
-        timeout: get_double(ps, P_TIMEOUT, t).clamp(1.0, 15.0),
+        timeout: cwtools_remote::plugin::clamp_timeout(get_double(ps, P_TIMEOUT, t)),
         model_dir,
         ort_lib,
         use_gpu: get_bool(ps, P_USE_GPU, t),

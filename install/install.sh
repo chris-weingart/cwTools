@@ -38,7 +38,7 @@ YES=""; DRY=""; MODE=install; SERVER=""; PURGE_MODELS=""; FORCE_CONFIG=""; NO_MO
 OPT_MODELS=""; OPT_MODEL_SETS=""; OPT_MODELS_URL=""; OPT_ALLOW=""; ALLOW_SET=""
 OPT_PLUGIN_DIR=""; OPT_ROOT=""; OPT_MODELS_FROM=""; OPT_PLUGINS=""; OPT_BACKUP_DIR=""
 OPT_BUNDLES_FROM=""; OPT_ORT_LIB=""; MX_SET=""; OPT_MX=""
-REMOTE_SET=""; OPT_REMOTE=""; SEGMENT_SET=""; OPT_SEGMENT=""
+REMOTE_SET=""; OPT_REMOTE=""
 OPT_LISTEN=""; OPT_PORT=""; OPT_SERVICE=""; OPT_UNIT=""; OPT_SVC_USER=""; OPT_PYTHON=""
 CANARY_CPU=1; NO_TEST=""
 
@@ -62,7 +62,9 @@ Plugins (default mode):
                                          PATH (layout PATH/cwRefine, PATH/cwMatte, PATH/cwSegment).
                                          Nothing is copied; the files there are verified. Missing
                                          sets are downloaded into PATH once if you can write there.
-                           skip          no models (Remote mode needs none)
+                           skip          no models (Remote mode needs none; small sets the
+                                         plugin itself reads, such as the cwSegment
+                                         tokenizer, are still installed)
                          A bare folder means from:FOLDER.
                          [a previous shared: install keeps its share; else the folder with the
                           most model sets among <package>/models, the package folder, the folder
@@ -74,12 +76,10 @@ Plugins (default mode):
   --models-from DIR      same as --models from:DIR
   --no-models            same as --models skip
   --list-models          list the model sets (size, default, licence) and exit
-  --remote-server URL    cwtools-infer server for cwRefine / cwMatte, e.g. http://gpu-box:8201
-                         ["" = none, or the value of an existing cwtools.conf]
-  --segment-server URL   SAM3 segmentation server for cwSegment Remote mode ["" = none, or the
-                         existing value, or a SAM3 server answering on the Remote host at :8199]
-                         (each is shown only when a chosen tool uses it; the plan shows whether
-                         it answers and what kind of server it is)
+  --remote-server URL    cwtools-infer server for Device / Mode = Remote (cwSegment, cwRefine,
+                         cwMatte), e.g. http://gpu-box:8201 ["" = none, or the value of an
+                         existing cwtools.conf] (the plan shows whether it answers and what
+                         kind of server it is)
   --ort-lib auto|PATH    onnxruntime library            [auto = Flame's own]
   --matchbox-dir DIR     where the Matchboxes that come with a plugin go (cwExtract with
                          cwSegment); "" = none        [$DEF_MX_DIR]
@@ -93,7 +93,7 @@ Plugins (default mode):
 Server (--server, Linux only):
   --root DIR             server root                   [$DEF_SERVER_ROOT]
   --models MODE          download | from:DIR | skip, as above (from:DIR also takes the
-                         DIR/<family>/ layout: vitmatte, mematte, birefnet)
+                         DIR/<family>/ layout: vitmatte, mematte, birefnet, sam3)
                          [from:<package>/server_models if present, else download]
   --model-sets LIST      [default = the server's startup models; "all" = every server set]
   --listen ADDR          listen address                [first non-loopback IPv4 address]
@@ -172,7 +172,7 @@ while [ $# -gt 0 ]; do
     --bundles-from) OPT_BUNDLES_FROM="$v" ;;
     --ort-lib) OPT_ORT_LIB="$v" ;;
     --remote-server) REMOTE_SET=1; OPT_REMOTE="$v" ;;
-    --segment-server) SEGMENT_SET=1; OPT_SEGMENT="$v" ;;
+    --segment-server) die "--segment-server is gone: cwSegment Remote uses the cwtools-infer server (--remote-server)" ;;
     --matchbox-dir) MX_SET=1; OPT_MX="$v" ;;
     --listen) OPT_LISTEN="$v" ;;
     --port) OPT_PORT="$v" ;;
@@ -411,8 +411,9 @@ url_check() { # URL -> prints a reachability line for URL/health
 url_ok() { curl -sfL -r 0-0 -m 15 -o /dev/null "$1" 2>/dev/null; } # URL -> 0 when it can be fetched
 url_host() { printf '%s' "$1" | sed -e 's#^[A-Za-z]*://##' -e 's#/.*##' -e 's#:[0-9]*$##'; }
 
-# URL -> SK = infer (cwtools-infer) | sam3 (SAM3 segmentation server) | forbidden (cwtools-infer,
-# this machine not allowed) | other | down | untested (no curl). Cached per URL.
+# URL -> SK = infer (cwtools-infer, API 2) | infer1 (cwtools-infer 0.3.0: no SAM3 for cwSegment) |
+# sam3 (an old SAM3 segmentation server) | forbidden (cwtools-infer, this machine not allowed) |
+# other | down | untested (no curl). Cached per URL.
 KIND_CACHE=""; SK=""
 server_kind() {
   SK="$(printf '%s' "$KIND_CACHE" | awk -F'\t' -v u="$1" '$1==u {print $2; exit}')"
@@ -423,6 +424,7 @@ server_kind() {
     case "$body" in
       "") SK=down ;;
       *'"forbidden"'*) SK=forbidden ;;
+      *'"cwtools-infer"'*'"api":1,'*|*'"api":1,'*'"cwtools-infer"'*) SK=infer1 ;;
       *'"cwtools-infer"'*) SK=infer ;;
       *'"features"'*|*'"model_loaded"'*) SK=sam3 ;;
       *) SK=other ;;
@@ -436,6 +438,7 @@ server_line() { # URL -> "URL  (what answers there)"
   server_kind "$1"
   case "$SK" in
     infer) printf '%s  (cwtools-infer, reachable)' "$1" ;;
+    infer1) printf '%s  (cwtools-infer 0.3.0, reachable)' "$1" ;;
     sam3) printf '%s  (SAM3 server, reachable)' "$1" ;;
     forbidden) printf '%s  (reachable, but this machine is not on its allow list: CWINFER_ALLOW on the server)' "$1" ;;
     down) printf '%s  (not reachable now; kept anyway)' "$1" ;;
@@ -478,8 +481,7 @@ tools_need() { # KEY "TOOLS" -> 0 if any of the tools uses that cwtools.conf key
     case "$1:$t" in
       models_dir:cwSegment|models_dir:cwRefine|models_dir:cwMatte) return 0 ;;
       ort_lib:cwSegment|ort_lib:cwRefine|ort_lib:cwMatte) return 0 ;;
-      remote_server:cwRefine|remote_server:cwMatte) return 0 ;;
-      segment_server:cwSegment) return 0 ;;
+      remote_server:cwSegment|remote_server:cwRefine|remote_server:cwMatte) return 0 ;;
     esac
   done
   return 1
@@ -529,12 +531,9 @@ conf_block() { # KEY VALUE -> comment + assignment for one key
       echo "# matte_models = $2/cwMatte"
       echo "# segment_models = $2/cwSegment" ;;
     remote_server)
-      echo "# Remote inference server (cwtools-infer) for Device = Remote in cwRefine / cwMatte,"
-      echo "# e.g. http://gpu-box:8201. Empty = none (local GPU only)."
+      echo "# Remote inference server (cwtools-infer) for Remote mode in cwSegment, cwRefine and"
+      echo "# cwMatte, e.g. http://gpu-box:8201. Empty = none (local GPU only)."
       echo "remote_server = $2" ;;
-    segment_server)
-      echo "# SAM3 segmentation server for cwSegment Remote mode. Empty = none."
-      echo "segment_server = $2" ;;
     ort_lib)
       echo "# onnxruntime library: auto (the one Flame ships) or the path to a libonnxruntime."
       echo "ort_lib = $2" ;;
@@ -553,7 +552,6 @@ conf_want() { # KEY -> value this install wants
   case "$1" in
     models_dir) printf '%s' "$MODELS_DIR" ;;
     remote_server) printf '%s' "$REMOTE" ;;
-    segment_server) printf '%s' "$SEGMENT" ;;
     ort_lib) printf '%s' "$ORT_LIB" ;;
   esac
 }
@@ -572,7 +570,7 @@ update_conf() {
   local s="$1" tgt="$2" tools="$3" oldm="$4" key want have pristine="" changed="" asked="" appended=""
   local new="$TMPD/conf.new"
   CONF_KEYS=""
-  for key in models_dir remote_server segment_server ort_lib; do
+  for key in models_dir remote_server ort_lib; do
     tools_need "$key" "$tools" && CONF_KEYS="$CONF_KEYS $key"
   done
   [ -n "$CONF_KEYS" ] || { info "cwtools.conf not needed by $tools"; return 0; }
@@ -607,7 +605,7 @@ update_conf() {
       local ask_new="$TMPD/conf.ask" explicit=""; cp "$new" "$ask_new"
       for key in $asked; do
         conf_set_value "$ask_new" "$key" "$(conf_want "$key")" > "$ask_new.t" && mv "$ask_new.t" "$ask_new"
-        case "$key" in remote_server) [ -n "$REMOTE_SET" ] && explicit=1 ;; segment_server) [ -n "$SEGMENT_SET" ] && explicit=1 ;; ort_lib) explicit=1 ;; esac
+        case "$key" in remote_server) [ -n "$REMOTE_SET" ] && explicit=1 ;; ort_lib) explicit=1 ;; esac
       done
       if [ -n "$FORCE_CONFIG" ] || [ -z "$YES" ] || [ -n "$explicit" ]; then
         echo "$tgt: changing to the plan's value(s):"
@@ -703,6 +701,10 @@ sets_for() { # "TOOLS" WHICH
       if (which == "default" && !d) next
       printf "%s ", $1 }' | sed 's/ $//'
 }
+# sets every install of TOOLS gets whatever the models mode, skip included (default flag r)
+always_sets() { # "TOOLS"
+  mt_rows | awk -F'\t' -v tools=" $1 " 'index(tools, " " $2 " ") && index($4, "r") && !seen[$1]++ {printf "%s ", $1}' | sed 's/ $//'
+}
 sets_total() { local t=0 x; for x in $1; do t=$((t + $(set_bytes "$x"))); done; echo "$t"; }
 list_models() { # "TOOLS" -> table
   echo "Model sets (archives cwtools-models-<set>.tar.gz; * = installed by default):"
@@ -720,6 +722,7 @@ default_marks() { # p|s|ps|- -> "* plugin * server"
   case "$1" in *l*) m="${m:+$m }* Linux" ;; esac
   case "$1" in *m*) m="${m:+$m }* macOS" ;; esac
   case "$1" in *s*) m="${m:+$m }* server" ;; esac
+  case "$1" in *r*) m="${m:+$m }* always" ;; esac
   printf '%s' "$m"
 }
 pick_sets() { # "TOOLS" ANSWER -> MSETS; 1 (with the reason printed) for an unknown set
@@ -880,6 +883,24 @@ install_set() {
     "$MODELS_CACHE"/stage/*) [ -z "$DRY" ] && rm -rf "$src" "$MODELS_CACHE/cwtools-models-$x.tar.gz" "$MODELS_CACHE/cwtools-models-$x.tar.gz.sha256" ;;
     "$TMPD"/stage/*) rm -rf "$src" ;; # unpacked archive: free the space before the next set
   esac
+}
+# SET: an always set (always_sets) is installed in every models mode. Already verified in place:
+# kept; from:FOLDER with the set: from there; else from the release (shared: verifies the share).
+install_always() {
+  local x="$1" n f; n="$(set_field "$x" 2)"
+  case "$MMODE" in shared:*) shared_set "$x" "$MODELS_DIR/$n" "$n"; return 0 ;; esac
+  if [ -z "$DRY" ] && verify_set_at "$x" "$MODELS_DIR/$n" >/dev/null; then
+    for f in $(set_files "$x"); do
+      rec model "$n" "$(mt_rows | awk -F'\t' -v s="$x" -v f="$f" '$1==s && $6==f {print $7; exit}')" "$MODELS_DIR/$n/$f"
+    done
+    info "models  $MODELS_DIR/$n: $x verified (kept)"; return 0
+  fi
+  case "$MMODE" in
+    from:*) if set_source "${MMODE#from:}" "$x" >/dev/null; then
+              install_set "$R_SUDO" "$MMODE" "$x" "$MODELS_DIR/$n" "$n"; return 0
+            fi ;;
+  esac
+  install_set "$R_SUDO" download "$x" "$MODELS_DIR/$n" "$n"
 }
 # SUDO DST TOOL: SHA256SUMS in DST lists every model of TOOL in models.tsv, installed or not.
 # Device = Remote names a model by its sha256 (the plugins read SHA256SUMS before hashing the
@@ -1057,7 +1078,7 @@ plan_derive() {
   if in_list cwSegment "$PLUGINS" && [ -d "$HERE/matchbox/cwExtract" ]; then MXS=cwExtract; fi
   [ -n "$CH_MX" ] || MX_DIR="$(manifest_meta "$OLD_MANIFEST" matchbox_dir)"
   [ -n "$CH_MX" ] || MX_DIR="${MX_DIR:-$DEF_MX_DIR}"
-  case "$MX_DIR/" in "$PLUGIN_DIR"/*) problem "line 8: the Matchbox folder is inside the plugin folder" ;; esac
+  case "$MX_DIR/" in "$PLUGIN_DIR"/*) problem "line 7: the Matchbox folder is inside the plugin folder" ;; esac
   # Flame's Matchbox browser opens in <presets>/<version>/matchbox/shaders: cwExtract goes there too
   MX_PRESETS=""
   if [ -n "$MXS" ] && [ -n "$MX_DIR" ]; then
@@ -1069,22 +1090,12 @@ plan_derive() {
   OLD_CONF=""
   for c in "$PLUGIN_DIR/cwtools.conf" "$ROOT/cwtools.conf"; do [ -f "$c" ] && { OLD_CONF="$c"; break; }; done
   [ -n "$CH_REMOTE" ] || REMOTE="$(conf_get "$OLD_CONF" remote_server)"
-  SEG_FOUND=""
-  if [ -z "$CH_SEG" ]; then
-    SEGMENT="$(conf_get "$OLD_CONF" segment_server)"
-    if [ -z "$SEGMENT" ] && [ -n "$REMOTE" ] && tools_need segment_server "$PLUGINS"; then
-      c="http://$(url_host "$REMOTE"):8199"; server_kind "$c"
-      [ "$SK" = sam3 ] && { SEGMENT="$c"; SEG_FOUND=1; }
-    fi
-  fi
   ORT_LIB="${OPT_ORT_LIB:-$(conf_get "$OLD_CONF" ort_lib)}"; ORT_LIB="${ORT_LIB:-auto}"
+  REMOTE_NOTE=""
   if tools_need remote_server "$PLUGINS" && [ -n "$REMOTE" ]; then
     server_kind "$REMOTE"
-    [ "$SK" = sam3 ] && problem "line 6: $REMOTE is a SAM3 server; cwRefine / cwMatte need cwtools-infer (port 8201 by default)"
-  fi
-  if tools_need segment_server "$PLUGINS" && [ -n "$SEGMENT" ]; then
-    server_kind "$SEGMENT"
-    [ "$SK" = infer ] || [ "$SK" = forbidden ] && problem "line 7: $SEGMENT is the cwtools-infer server; cwSegment Remote needs the SAM3 server (port 8199 by default), or none"
+    [ "$SK" = sam3 ] && problem "line 6: $REMOTE is a SAM3 server; the plugins need cwtools-infer (port 8201 by default)"
+    [ "$SK" = infer1 ] && in_list cwSegment "$PLUGINS" && REMOTE_NOTE="cwSegment Remote needs cwtools-infer 0.3.1 or newer there: update the server (install.sh --server)"
   fi
   return 0
 }
@@ -1102,7 +1113,7 @@ plan_show() {
       download) v="download from the release" ;;
       from:*) v="copy from ${MMODE#from:}" ;;
       shared:*) v="studio share ${MMODE#shared:} (nothing copied; cwtools.conf points there)" ;;
-      *) v="none (Device = Remote only)" ;;
+      *) v="none (Device = Remote only)$(a="$(always_sets "$MT")"; [ -n "$a" ] && printf '; %s (%s) still installed' "$a" "$(human "$(sets_total "$a")")")" ;;
     esac
     echo "  4  models          $v"
     if [ "$MMODE" != skip ]; then
@@ -1115,12 +1126,12 @@ plan_show() {
     [ -n "$noloc" ] && echo "                     no local models for:$noloc (Device = Remote works without them)"
   fi
   tools_need remote_server "$PLUGINS" && echo "  6  Remote server   $(server_line "$REMOTE")"
-  tools_need segment_server "$PLUGINS" && echo "  7  SAM3 server     $(server_line "$SEGMENT")$([ -n "$SEG_FOUND" ] && printf ' (found on the Remote host)')"
+  [ -n "$REMOTE_NOTE" ] && echo "                     $REMOTE_NOTE"
   if [ -n "$MXS" ]; then
     if [ -n "$MX_DIR" ]; then
-      echo "  8  Matchbox        $MXS -> $MX_DIR/$MXS"
+      echo "  7  Matchbox        $MXS -> $MX_DIR/$MXS"
       [ -n "$MX_PRESETS" ] && echo "                     and the Matchbox browser of every Flame here: $(printf '%s' "$MX_PRESETS" | wc -l | tr -d ' ') x <presets>/matchbox/shaders/cwTools"
-    else echo "  8  Matchbox        none ($MXS stays in the package: matchbox/)"; fi
+    else echo "  7  Matchbox        none ($MXS stays in the package: matchbox/)"; fi
   fi
   echo "     backups         $BACKUP_DIR"
   [ -n "$PROBLEMS" ] && printf '%s' "$PROBLEMS" | sed 's/^/  PROBLEM  /'
@@ -1144,16 +1155,15 @@ plugins_install() {
   [ -n "$OPT_PLUGINS" ] && { opt_check --plugins "$OPT_PLUGINS" chk_plugins; OPT_PLUGINS="$VALID"; }
 
   # plan state: a value per line, and whether it was chosen (option or edit) or is a default
-  local PLUGINS MSETS_ANS CH_PD CH_MM CH_SETS CH_REMOTE CH_SEG DM
+  local PLUGINS MSETS_ANS CH_PD CH_MM CH_SETS CH_REMOTE DM
   local OLD_MANIFEST OLD_PD OLD_TOOLS OLD_MM OLD_CONF STD_PLUGIN STD_ROOT ALL_TOOLS KEEP_TOOLS
-  local MT MSETS PROBLEMS SEG_FOUND NEED_B FREE_B MXS MX_DIR CH_MX MX_PRESETS
+  local MT MSETS PROBLEMS REMOTE_NOTE NEED_B FREE_B MXS MX_DIR CH_MX MX_PRESETS
   PLUGINS="${OPT_PLUGINS:-$AVAIL}"
   ROOT="$(abspath "${OPT_ROOT:-$DEF_ROOT}")"
   PLUGIN_DIR="$(abspath "$OPT_PLUGIN_DIR")"; CH_PD="${OPT_PLUGIN_DIR:+1}"
   MMODE="$OPT_MODELS"; CH_MM="${OPT_MODELS:+1}"
   MSETS_ANS="$OPT_MODEL_SETS"; CH_SETS="${OPT_MODEL_SETS:+1}"
   REMOTE="$OPT_REMOTE"; CH_REMOTE="$REMOTE_SET"
-  SEGMENT="$OPT_SEGMENT"; CH_SEG="$SEGMENT_SET"
   MX_DIR="$(abspath "$OPT_MX")"; CH_MX="$MX_SET"
   while :; do
     plan_derive
@@ -1186,21 +1196,18 @@ plugins_install() {
            ask MSETS_ANS "Model sets: names, default or all" "$MSETS" chk_sets; CH_SETS=1
          fi ;;
       6) if tools_need remote_server "$PLUGINS"; then
-           ask REMOTE "Remote server for cwRefine / cwMatte (cwtools-infer, e.g. http://gpu-box:8201; - = none)" "$REMOTE" chk_url; CH_REMOTE=1
+           ask REMOTE "Remote server (cwtools-infer, e.g. http://gpu-box:8201; - = none)" "$REMOTE" chk_url; CH_REMOTE=1
          else echo "  (not used by $PLUGINS)"; fi ;;
-      7) if tools_need segment_server "$PLUGINS"; then
-           ask SEGMENT "SAM3 server for cwSegment Remote (e.g. http://gpu-box:8199; - = none)" "$SEGMENT" chk_url; CH_SEG=1
-         else echo "  (not used by $PLUGINS)"; fi ;;
-      8) if [ -n "$MXS" ]; then
+      7) if [ -n "$MXS" ]; then
            ask MX_DIR "Matchbox folder (- = none)" "$MX_DIR" chk_folder; CH_MX=1
          else echo "  (no Matchbox comes with $PLUGINS)"; fi ;;
-      *) echo "  Enter, a line number (1-8) or n" ;;
+      *) echo "  Enter, a line number (1-7) or n" ;;
     esac
   done
 
   # the SAM 3 licence is asked before anything is copied
   local x SAM_OK=""
-  for x in $MSETS; do
+  for x in $MSETS $(always_sets "$MT"); do
     [ "$(set_field "$x" 2)" = cwSegment ] || continue
     if sam_license_ok; then SAM_OK=y; else SAM_OK=n; fi
     break
@@ -1327,6 +1334,14 @@ EOF
       *) install_set "$R_SUDO" "$MMODE" "$x" "$MODELS_DIR/$n" "$n" ;;
     esac
   done
+  for x in $(always_sets "$MT"); do
+    in_list "$x" "$MSETS" && continue
+    n="$(set_field "$x" 2)"
+    if [ "$n" = cwSegment ] && [ "$SAM_OK" != y ]; then
+      warn "model set $x not installed (SAM License not accepted): cwSegment text prompts need it"; continue
+    fi
+    install_always "$x"
+  done
   case "$MMODE" in shared:*) ;; *) for n in $MT; do known_sums "$R_SUDO" "$MODELS_DIR/$n" "$n"; done ;; esac
   [ "$MMODE" = skip ] && [ -n "$MT" ] && info "no local models for $MT: Device = Remote (later: install.sh --models download|from:FOLDER)"
 
@@ -1429,7 +1444,7 @@ plugins_check() {
   elif [ -f "$pd/cwtools.conf" ]; then conf="$pd/cwtools.conf"
   elif [ "$OS" = linux ]; then conf=/opt/cwTools/cwtools.conf
   else conf="/Library/Application Support/cwTools/cwtools.conf"; fi
-  local needs=""; for n in models_dir remote_server segment_server ort_lib; do tools_need "$n" "$tools" && needs=1; done
+  local needs=""; for n in models_dir remote_server ort_lib; do tools_need "$n" "$tools" && needs=1; done
   if [ -n "$needs" ]; then
     echo "Config the plugins will read: $conf"
     if [ -f "$conf" ]; then grep -v '^[[:space:]]*#' "$conf" | grep -v '^[[:space:]]*$' | sed 's/^/  /'
@@ -1443,7 +1458,6 @@ plugins_check() {
     done
     local u
     tools_need remote_server "$tools" && u="$(conf_get "$conf" remote_server)" && [ -n "$u" ] && { echo "Remote server:"; url_check "$u"; }
-    tools_need segment_server "$tools" && u="$(conf_get "$conf" segment_server)" && [ -n "$u" ] && { echo "Segment server:"; url_check "$u"; }
   fi
   [ "$CHK_BAD" -eq 0 ] && echo "CHECK OK" || { echo "CHECK FAILED ($CHK_BAD problem(s))"; return 1; }
 }
@@ -1723,7 +1737,7 @@ CWINFER_LOG_DIR=$SROOT/logs
 CWINFER_STARTUP_CANARY=$startup
 # release a model after this many idle seconds; at most this many loaded at once
 CWINFER_IDLE_S=600
-CWINFER_MAX_SESSIONS=2
+CWINFER_MAX_SESSIONS=3
 CWINFER_MAX_QUEUE=8
 CWINFER_SHRINK=1
 CWINFER_GPU_MEM_LIMIT_GB=48
@@ -1885,7 +1899,6 @@ server_uninstall() {
 # options are checked before any question is asked
 [ -n "$OPT_MODELS" ] && { opt_check --models "$OPT_MODELS" chk_models_mode; OPT_MODELS="$VALID"; }
 [ -n "$OPT_REMOTE" ] && { opt_check --remote-server "$OPT_REMOTE" chk_url; OPT_REMOTE="$VALID"; }
-[ -n "$OPT_SEGMENT" ] && { opt_check --segment-server "$OPT_SEGMENT" chk_url; OPT_SEGMENT="$VALID"; }
 [ -n "$OPT_PORT" ] && opt_check --port "$OPT_PORT" chk_port
 [ -n "$OPT_SERVICE" ] && opt_check --service "$OPT_SERVICE" chk_service
 [ -n "$OPT_SVC_USER" ] && opt_check --service-user "$OPT_SVC_USER" chk_user

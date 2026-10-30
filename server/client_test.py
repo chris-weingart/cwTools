@@ -4,8 +4,9 @@ e.g. on the server: venv/bin/python server/client_test.py http://127.0.0.1:8201)
 
 Checks: /health, /models, a lut8-webp and a lut8-grad-zstd round trip vs the
 canary fingerprint, u8 output mode, sha256 mismatch -> 409, bad input name ->
-400, corrupted crc -> 400, unknown model -> 404, 3 parallel requests queue,
-LRU cap (3 models -> at most MAX_SESSIONS loaded), /release.
+400, corrupted crc -> 400, unknown model -> 404, tensor store (keep, fetch with
+an index, refs concatenated as an input, missing ref -> 409, forget), 3 parallel
+requests queue, LRU cap (3 models -> at most MAX_SESSIONS families loaded), /release.
 """
 from __future__ import annotations
 
@@ -69,7 +70,7 @@ def request(desc, feeds, sha=None, codec="auto", extra=None, corrupt_crc=False, 
 
 def main():
     h = get("/health")
-    check("health ok", h.get("ok") and h.get("api") == 1, f"vram {h.get('vram')}")
+    check("health ok", h.get("ok") and h.get("api") == 2, f"vram {h.get('vram')}, store {h.get('store')}")
     ms = {m["name"]: m for m in get("/models")["models"]}
     # vitmatte_core is required; the BiRefNet checks (LRU) are skipped when those models
     # are not installed (e.g. a server set up with the cwRefine core only).
@@ -118,6 +119,40 @@ def main():
     st, body = post(request({**vm, "name": "no_such_model"}, feeds))
     check("unknown model -> 404", st == 404, body[:120].decode())
 
+    # tensor store: keep the output (download nothing), fetch it, feed 4 copies as the input
+    st, body = post(request(vm, feeds, extra={"outputs": [], "keep": {"alphas": "ct/alphas"}}))
+    hd = ct.unpack(body)[0] if st == 200 else {}
+    check("keep: output stays on the server", st == 200 and hd.get("outputs") == [] and hd.get("kept") == ["ct/alphas"],
+          str(hd.get("timings_ms") or body[:200]))
+    # kept AND downloaded in one run: the fetch must be bit-identical (GPU runs need not be)
+    st, body = post(request(vm, feeds, extra={"keep": {"alphas": "ct/alphas"}}))
+    hd, area = ct.unpack(body)
+    plain = ct.decode_tensor(hd["outputs"][0], area)
+    b = ct.Builder()
+    st, body = post(b.pack({"tensors": [{"ref": "ct/alphas", "name": "a"},
+                                        {"ref": "ct/alphas", "name": "cols", "axis": 3, "index": [0, 7, 63]}]}), "/fetch")
+    ok = st == 200
+    if ok:
+        hd, area = ct.unpack(body)
+        a, cols = (ct.decode_tensor(d, area) for d in hd["outputs"])
+        ok = np.array_equal(a, plain) and np.array_equal(cols, plain[..., [0, 7, 63]])
+    check("fetch = the plain output (and an index selection)", ok, str(body[:120]) if st != 200 else "")
+    b = ct.Builder()
+    body = b.pack({"model": vm["name"], "sha256": vm["sha256"],
+                   "inputs": [{"name": vm["inputs"][0]["name"], "refs": ["ct/alphas"] * 4, "axis": 1}]})
+    st, body = post(body)
+    check("refs concatenated as an input", st == 200, "" if st == 200 else body[:200].decode())
+    b = ct.Builder()
+    st, body = post(b.pack({"model": vm["name"], "sha256": vm["sha256"],
+                            "inputs": [{"name": vm["inputs"][0]["name"], "refs": ["ct/none"]}]}))
+    j = json.loads(body) if st != 200 else {}
+    check("missing ref -> 409 ref_missing", st == 409 and j.get("missing") == ["ct/none"], str(j))
+    req = urllib.request.Request(URL + "/forget", data=json.dumps({"prefix": "ct/"}).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        j = json.loads(r.read())
+    check("forget by prefix", j.get("forgotten") == 1, str(j))
+
     # 3 parallel requests: serialised on the GPU, later ones report queue time
     res = []
 
@@ -139,7 +174,8 @@ def main():
         check(f"{name} infer", st == 200, ct.unpack(body)[0]["timings_ms"] if st == 200 else body[:200].decode())
     h = get("/health")
     cap = h["settings"]["max_sessions"]
-    check("LRU cap", len(h["sessions"]) <= cap, f"{[s['model'] for s in h['sessions']]} cap {cap}, vram {h['vram']}")
+    fams = {s.get("family", s["model"]) for s in h["sessions"]}
+    check("LRU cap (model families)", len(fams) <= cap, f"{[s['model'] for s in h['sessions']]} cap {cap}, vram {h['vram']}")
     st, body = post(b"", "/release")
     h = get("/health")
     check("release", st == 200 and not h["sessions"], f"{body.decode()} vram after {h['vram']}")

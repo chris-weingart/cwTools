@@ -83,7 +83,7 @@ unsafe extern "C" fn main_entry(
         } else if cmp(kOfxActionDestroyInstance) {
             kOfxStatOK
         } else if cmp(kOfxImageEffectActionGetClipPreferences) {
-            actions::action_get_clip_preferences(out_args)
+            actions::action_get_clip_preferences(h, out_args)
         } else if cmp(kOfxActionInstanceChanged) {
             actions::action_instance_changed(h, in_args)
         } else if cmp(kOfxImageEffectActionRender) {

@@ -60,7 +60,13 @@ def main():
         raw = S.read_verified(m.path, m.sha)
         S.check_initializers_finite(raw, m.name)
         ep = m.ep_defaults()
-        feeds = canary.inputs_for(desc)
+        try:
+            feeds = canary.inputs_for(desc)
+        except (ValueError, KeyError) as exc:
+            # e.g. the SAM3 decoder / detector / tracker (prompt, text and memory inputs): served
+            # without a canary (sha256 + finite weights still checked at every load)
+            print(json.dumps({"model": m.name, "skipped": f"no canary recipe ({exc})"}), flush=True)
+            continue
         s1 = session(raw, m, ep)
         o1 = s1.run(None, feeds)
         o1b = s1.run(None, feeds)

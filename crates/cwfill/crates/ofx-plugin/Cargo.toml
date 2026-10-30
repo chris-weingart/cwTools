@@ -1,6 +1,6 @@
 [package]
 name = "cwfill"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "cwFill — OFX foreground-colour (unpremult/despill) solver for Flame"
 license = "Apache-2.0"

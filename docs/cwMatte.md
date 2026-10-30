@@ -1,5 +1,3 @@
-<p><picture><source media="(prefers-color-scheme: light)" srcset="img/cwMatte-light.svg"><img src="img/cwMatte.svg" alt="cwMatte" height="56"></picture></p>
-
 # cwMatte
 
 Automatic matte of the main subject with no prompts. Plug in a plate and get

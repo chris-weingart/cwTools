@@ -1,5 +1,3 @@
-<p><picture><source media="(prefers-color-scheme: light)" srcset="img/cwFill-light.svg"><img src="img/cwFill.svg" alt="cwFill" height="56"></picture></p>
-
 # cwFill
 
 Foreground estimation for soft matte edges. cwFill works out the true
@@ -33,7 +31,7 @@ other OFX hosts.
   re-solve.
 - **Limit to Soft Matte** is on by default: despill cleans the edge and spares
   the solid body.
-- **Bit depth:** a 16-bit plate gives a 16-bit result.
+- **Bit depth:** the result has the plate's bit depth (8-bit, 16-bit, half or 32-bit float).
 
 ## Inputs
 

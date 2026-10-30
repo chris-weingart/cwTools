@@ -1,5 +1,3 @@
-<p><picture><source media="(prefers-color-scheme: light)" srcset="img/cwSegment-light.svg"><img src="img/cwSegment.svg" alt="cwSegment" height="56"></picture></p>
-
 # cwSegment
 
 Prompt-based object segmentation for Flame Batch: tell it **what** to
@@ -52,8 +50,9 @@ Tracking follows chosen objects through the shot with SAM3's video memory
    orange frame. Click the ones to follow; each click adds its number to
    **Tracked Objects** (or type the numbers, e.g. `2, 5`, and press **Anchor
    Here**). The frame you pick on becomes the anchor frame.
-3. Press **Pick Objects** again to finish. **Track** turns on (Forward; also
-   Backward or Both). The output now carries only the picked objects.
+3. Press **Pick Objects** again to finish. **Track** turns on (Both: from the
+   anchor forward and back; also Forward or Backward only). The output now
+   carries only the picked objects.
 4. Press **Track Range**: the frames from the anchor to **Track To**
    (Forward / Both) and back to **Track From** (Backward / Both) are fetched
    and then tracked in the background, so Flame stays usable. Reading the
@@ -82,17 +81,25 @@ starts over by itself.
   holds about 1.5 GB between frames and peaks near 4 GB during a frame (fp16
   encoder, 24 GB NVIDIA GPU: about 0.45 s a frame). *Release GPU Memory* unloads it.
   Without a GPU it runs on the CPU, much slower.
-- **Remote** sends the frame to a SAM3 server (**Server URL**, or set once at
-  install). The SAM3 server is not part of this release yet; until it is, use
-  Local.
+- **Remote** runs the same SAM3 models on a cwtools-infer GPU server, the one
+  cwMatte and cwRefine use (**Server URL**, or set once at install), tracking
+  included. Each frame goes up once, losslessly (about 1-2 MB); the server
+  keeps the frame's features and the tracking memory, and only masks come
+  back. Results match Local. The server needs the SAM3 model sets
+  (`install.sh --server` installs them by default); the workstation keeps its
+  Model Folder for the checksums and, for text prompts, the tokenizer files
+  (the installer puts both there even with no local models).
+  **Test Server** checks both. See [Remote server](remote-server.md).
 
 ## Models
 
 The SAM3 ONNX files come in four downloads: `segment-sam3` (fp16 image
-encoder for the GPU and the decoder), `segment-sam3-text` (text encoder,
-detector and tokenizer files, needed for text prompts) and, for CPU-only
-machines, `segment-sam3-cpu` (fp32 encoder). The installer picks the first
-two by default. Tracking needs `segment-sam3-track` (86 MB, the tracker's
+encoder for the GPU and the decoder), `segment-sam3-text` (text encoder and
+detector, needed for text prompts) and, for CPU-only machines,
+`segment-sam3-cpu` (fp32 encoder). The installer picks the first two by
+default. The tokenizer files for text prompts are a small set of their own,
+`segment-sam3-tokenizer` (1.4 MB), installed with cwSegment every time, also
+for Remote-only workstations. Tracking needs `segment-sam3-track` (86 MB, the tracker's
 memory networks), also a default. SAM3 is published by Meta under its own licence (SAM License,
 see `licenses/`); the installer asks you to accept it.
 

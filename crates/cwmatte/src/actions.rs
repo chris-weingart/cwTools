@@ -26,7 +26,9 @@ pub fn action_describe(effect_handle: OfxImageEffectHandle) -> OfxStatus {
         "Automatic matte with BiRefNet (no prompts): plate -> matte in alpha. Optional ROI pre-crop and garbage mask. Local ONNX via Flame's onnxruntime.",
     );
     prop_set_string(props, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter);
-    prop_set_string(props, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat);
+    for (i, d) in cwtools_core::image::SUPPORTED_DEPTHS.iter().enumerate() {
+        prop_set_string(props, kOfxImageEffectPropSupportedPixelDepths, i as i32, d);
+    }
     prop_set_int(props, kOfxImageEffectPropSupportsTiles, 0, 0);
     prop_set_int(props, kOfxImageEffectPropSupportsMultipleClipDepths, 0, 0);
     prop_set_int(props, kOfxImageEffectPropTemporalClipAccess, 0, 0);
@@ -62,10 +64,12 @@ pub fn action_describe_in_context(effect_handle: OfxImageEffectHandle) -> OfxSta
     kOfxStatOK
 }
 
-pub fn action_get_clip_preferences(out_args: OfxPropertySetHandle) -> OfxStatus {
+pub fn action_get_clip_preferences(effect_handle: OfxImageEffectHandle, out_args: OfxPropertySetHandle) -> OfxStatus {
+    // one depth for all clips: the Source's (16-bit in = 16-bit out)
+    let depth = cwtools_core::image::pref_depth(effect_handle);
     for name in ["Source", "Output"] {
         prop_set_string(out_args, &clip_pref_components_key(name), 0, kOfxImageComponentRGBA);
-        prop_set_string(out_args, &clip_pref_depth_key(name), 0, kOfxBitDepthFloat);
+        prop_set_string(out_args, &clip_pref_depth_key(name), 0, depth);
     }
     kOfxStatOK
 }
