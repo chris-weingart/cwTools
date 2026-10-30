@@ -16,7 +16,7 @@ Each tool installs on its own, so take only the ones you need, or get the
 
 <table>
 <tr>
-<td rowspan="2" width="120"><b>1</b>&ensp;Mask</td>
+<td rowspan="2" width="150"><b>1</b>&nbsp;&nbsp;Mask</td>
 <td><a href="docs/cwSegment.md"><b>cwSegment</b></a></td>
 <td>Object masks from a prompt: text, points or a box. Many objects at once.</td>
 </tr>
@@ -25,12 +25,12 @@ Each tool installs on its own, so take only the ones you need, or get the
 <td>Automatic matte of the main subject, no prompt needed.</td>
 </tr>
 <tr>
-<td width="120"><b>2</b>&ensp;Refine</td>
+<td width="150"><b>2</b>&nbsp;&nbsp;Refine</td>
 <td><a href="docs/cwRefine.md"><b>cwRefine</b></a></td>
 <td>Rough mask to production matte with fine detail.</td>
 </tr>
 <tr>
-<td width="120"><b>3</b>&ensp;Foreground</td>
+<td width="150"><b>3</b>&nbsp;&nbsp;Foreground</td>
 <td><a href="docs/cwFill.md"><b>cwFill</b></a></td>
 <td>True foreground colour in the soft edge, plus despill. No model needed, runs in any OFX host.</td>
 </tr>
