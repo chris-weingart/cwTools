@@ -1,8 +1,8 @@
 <h1 align="center">cwTools</h1>
 
 <p align="center"><b>ML matting and foreground tools for Autodesk Flame.</b><br>
-Segment and refine mattes, then fix the foreground's edge colour, right in Batch,
-as native OpenFX nodes with full parameter control.<br>
+Segment objects in your plates, create and refine mattes, then fix the foreground's
+edge colour, right in Batch, as native OpenFX nodes with full parameter control.<br>
 Runs on the workstation, or optionally on a <a href="#remote-gpu-server-optional">shared GPU server</a> on your network.</p>
 
 <!-- screenshot / GIF of a Batch tree: mask -> refine -> clean -->
